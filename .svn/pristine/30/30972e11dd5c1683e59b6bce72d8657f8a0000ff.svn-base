@@ -1,0 +1,23 @@
+spring:
+#服务名称
+  application:
+    name: weather-hbase
+#HBASE配置
+app:
+  datasource:
+    hdp:
+      fs.defaultFS: hdfs://ambari01:8020
+      zk-quorum: ambari03,ambari02,ambari01
+      zk-port: 2181
+      zookeeper.znode.parent: /hbase-unsecure
+    hbase:
+      master: 10.0.110.121:16000
+      rootdir: hdfs://ambari01:8020/apps/hbase/data
+
+server:
+  port: 9998
+  tomcat:
+    uri-encoding: UTF-8
+    
+CSVPath: "/hadoop/sdc/test/hbasezip/"
+IPADDR: "10.0.110.124"

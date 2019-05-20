@@ -1,0 +1,324 @@
+package com.youzidata.weather.service;
+
+import com.youzidata.weather.dao.HbaseDao;
+import com.youzidata.weather.util.CSVUtil;
+import com.youzidata.weather.util.DoubleUtil;
+import com.youzidata.weather.util.RowKeyUtil;
+import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.*;
+import org.apache.hadoop.hbase.filter.BinaryComparator;
+import org.apache.hadoop.hbase.filter.CompareFilter;
+import org.apache.hadoop.hbase.filter.Filter;
+import org.apache.hadoop.hbase.filter.RowFilter;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.data.hadoop.hbase.TableCallback;
+import org.springframework.stereotype.Service;
+
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * @Author: YingBoWei
+ * @Date: 2019-04-17 11:04
+ * @Description:
+ */
+@Service
+public class SearchSplitDataService {
+    @Autowired
+    private HbaseTemplate hbaseTemplate;
+
+    @Autowired
+    private HbaseDao hbaseDao;
+
+    @Value("${CSVPath}")
+    private String CSVPath;
+
+    private static byte[] family = "cf".getBytes();
+
+    /**
+     * 统计查询时间、时间等
+     * @param startLat
+     * @param endLat
+     * @param startLon
+     * @param endLon
+     * @return
+     */
+    public Map<String, Object> statisticalQuery(Integer Integer, Double startLat, Double endLat, Double startLon, Double endLon) {
+        Map<String, Object> map_return = new HashMap<>();
+        String rowkey_prefix = "2018092903_0_";
+        //计算开始和结束纬度之间，需要在hbase中查询的所有rowkey的纬度拼接部分
+        List<String> rowkey_lat = RowKeyUtil.getRowKeyByLonOrLat(startLat,endLat);
+        //计算开始和结束经度之间，需要在hbase中查询的所有rowkey的经度拼接部分
+        List<String> rowkey_lon = RowKeyUtil.getRowKeyByLonOrLat(startLon,endLon);
+        //        CSVUtil util = new CSVUtil();//生成csv文件的工具类
+//        DoubleUtil doubleUtil = new DoubleUtil();//设置数字精度的工具类
+        long start = new Date().getTime();//统计时长-开始时间
+//        long time = System.currentTimeMillis();//获取当前时间，用来组成生成的文件名
+        Map<String, List<List<String>>> row_map = new LinkedHashMap<>(); //每一级的纬度对应的全部rowkey，拼起来的数据块
+        Connection conn = null;
+        Table table = null;
+        try {
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            TableName tableName = TableName.valueOf("weather_2018092903");
+            table = conn.getTable(tableName);
+            for(String str:rowkey_lat) {
+//                Scan scan = new Scan();
+//                RowFilter filter1= new RowFilter(CompareFilter.CompareOp.GREATER_OR_EQUAL, new BinaryComparator(Bytes.toBytes(rowkey_prefix+str+"_"+rowkey_lon.get(0))));//大于等于
+//                RowFilter filter2= new RowFilter(CompareFilter.CompareOp.LESS_OR_EQUAL, new BinaryComparator(Bytes.toBytes(rowkey_prefix+str+"_"+rowkey_lon.get(rowkey_lon.size()-1))));//小于等于
+//                System.out.println(rowkey_prefix+str+"_"+rowkey_lon.get(0));
+//                System.out.println(rowkey_prefix+str+"_"+rowkey_lon.get(rowkey_lon.size()-1));
+//                scan.setFilter(filter1);
+//                scan.setFilter(filter2);
+//                scan.setStartRow(Bytes.toBytes(rowkey_prefix+str+"_"+rowkey_lon.get(0)));
+//                scan.setStopRow(Bytes.toBytes(rowkey_prefix+str+"_"+rowkey_lon.get(rowkey_lon.size()-1)));
+//                ResultScanner scanner = table.getScanner(scan);
+//                for (Result res : scanner) {
+//                    System.out.println(res);
+//                }
+//                scanner.close();
+                List<Get> getList = new ArrayList<>();
+                List<List<String>> row = new ArrayList<>();//二维数组
+                for(String str_lon:rowkey_lon) {
+                    Get get = new Get(Bytes.toBytes(rowkey_prefix+str+"_"+str_lon));
+                    get.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("Himawari8"));
+                    getList.add(get);
+                }
+                Result[] resarr = table.get(getList);
+                for (int i = 0; i < resarr.length; i++) {
+                    Result result = resarr[i];
+                    int row_index = 1;//按行读取hbase中的矩阵，记录当前读取行数
+                    BufferedReader br = new BufferedReader(
+                            new InputStreamReader(new ByteArrayInputStream(result.value())));
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        if(row_index > 1) {
+                            List<String> row_strs = Arrays.asList(line.split(","));
+                            row_strs = row_strs.subList(1,row_strs.size());
+                            if(i > 0) {//同一纬度，不通经度的矩阵，为了防止有重复数据，从第二个矩阵块开始舍弃一列数字
+                                row_strs = row_strs.subList(1,row_strs.size());
+                            }
+                            if(i == 0) {
+                                row.add(row_strs);
+                            }else{
+                                row.get(row_index - 2).addAll(row_strs);
+                            }
+                        }
+                        row_index++;
+                    }
+                }
+                row_map.put(str,row);
+            }
+
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+
+        return map_return;
+    }
+
+    public Map<String, Object> statisticalQueryTest(Integer gid_level, Double startLat,
+            Double endLat, Double startLon, Double endLon) {
+        Map<String, Object> map_return = new HashMap<>();
+        String rowkey_prefix = "2018092903_0_";
+        //计算开始和结束纬度之间，需要在hbase中查询的所有rowkey的纬度拼接部分
+        List<String> rowkey_lat = RowKeyUtil.getRowKeyByLonOrLat(startLat,endLat);
+        //计算开始和结束经度之间，需要在hbase中查询的所有rowkey的经度拼接部分
+        List<String> rowkey_lon = RowKeyUtil.getRowKeyByLonOrLat(startLon,endLon);
+
+        int lat_first_index;//第一个纬度范围的矩阵，纬度开始的索引
+        int lat_final_index;//最后一个纬度范围的矩阵，纬度结束的索引
+        int lon_first_index;//第一个经度范围的矩阵，纬度开始的索引
+        int lon_final_index;//最后一个经度范围的矩阵，纬度结束的索引
+        //计算
+        String [] rowkey_lat_first = rowkey_lat.get(0).split("_");
+        lat_first_index = (int)((Double.parseDouble(rowkey_lat_first[1]) - endLat)/0.01 + 2 - 1);
+        String [] rowkey_lat_final = rowkey_lat.get(rowkey_lat.size() - 1).split("_");
+        lat_final_index = (int)((Double.parseDouble(rowkey_lat_final[0]) - startLat)/0.01 + 2 - 1);
+        String [] rowkey_lon_first = rowkey_lon.get(0).split("_");
+        lon_first_index = (int)((startLon - Double.parseDouble(rowkey_lon_first[0]))/0.01 + 2 - 1);;
+        String [] rowkey_lon_final = rowkey_lon.get(rowkey_lon.size() - 1).split("_");
+        lon_final_index = (int)((endLon - Double.parseDouble(rowkey_lon_final[0]))/0.01 + 2 - 1);
+
+        List<List<String>> row_all = new ArrayList<>(); //每个纬度范围的数据块拼成最终的一个list，进行抽希
+        Connection conn = null;
+        Table table = null;
+        Long selectTime = 0l;
+        try {
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            TableName tableName = TableName.valueOf("weather_2018092903");
+            table = conn.getTable(tableName);
+            selectTime = System.currentTimeMillis();
+            for(int i = 0; i < rowkey_lat.size(); i++) {
+                String[] rowkey_lat_strs = rowkey_lat.get(i).split("_");//获取一个rowkey中纬度的端点
+                String rowkey_lat_str = rowkey_lat.get(i);//获取一个rowkey中纬度的范围
+                List<Get> getList = new ArrayList<>();
+                List<List<String>> row = new ArrayList<>();//二维数组，存储一个纬度范围内的所有矩阵块
+                for(String rowkey_lon_str:rowkey_lon) {
+                    Get get = new Get(Bytes.toBytes(rowkey_prefix+rowkey_lat_str+"_"+rowkey_lon_str));
+                    get.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("Himawari8"));
+                    getList.add(get);
+                }
+                Result[] resarr = table.get(getList);//一个纬度范围内的所有矩阵块数据
+                int  startLatIndex,endLatIndex;//当前这个纬度范围内，在读取矩阵并转化为二维数组后的行起始索引
+                if(rowkey_lat.size() == 1) {//只有一个纬度范围
+                    startLatIndex = lat_first_index;
+                    endLatIndex = lat_final_index;
+
+                }else{//纬度范围大于一个
+                    if(i == 0) {//查询的是第一个纬度范围
+                        startLatIndex = lat_first_index;
+                        endLatIndex = 1001;
+                    }else if(i == rowkey_lat.size() - 1){//查询的是最后一个纬度范围
+                        startLatIndex = 2;
+                        endLatIndex = lat_final_index;
+                    }else {//查询除了第一个和最后一个纬度范围
+                        startLatIndex = 2;
+                        endLatIndex = 1001;
+                    }
+                }
+                //同一个纬度范围内，遍历所有经度范围的矩阵块
+                for (int j = 0; j < resarr.length; j++) {
+                    String[] rowkey_lon_strs = rowkey_lon.get(j).split("_");//获取一个rowkey中经度的范围
+                    String rowkey_lon_str = rowkey_lon.get(j);//获取一个rowkey中经度的两个端点值
+                    int startLonIndex, endLonIndex;//当前这个经度范围内，在读取矩阵并转化为二维数组后的行起始索引
+                    if(resarr.length == 1) {//同一纬度范围内，只有一个经度范围
+                        startLonIndex = lon_first_index;
+                        endLonIndex = lon_final_index;
+                    }else {//同一纬度范围内，经度范围大于一个
+                        if(j == 1){//当前查询的是第一个经度范围
+                            startLonIndex = lon_first_index;
+                            endLonIndex = 1001;
+                        }else if(j == resarr.length - 1) {//当前查询的是最后一个经度范围
+                            startLonIndex = 2;
+                            endLonIndex = lon_final_index;
+                        }else {//除了第一个经度范围和最后一个经度范围
+                            startLonIndex = 2;
+                            endLonIndex = 1001;
+                        }
+                    }
+                    Result result = resarr[j];
+                    BufferedReader br = new BufferedReader(
+                            new InputStreamReader(new ByteArrayInputStream(result.value())));
+                    String line;
+                    int row_index = 0;//按行读取hbase中的矩阵，记录当前读取行数,第一行索引为0
+                    while ((line = br.readLine()) != null) {
+                        List<String> row_strs = Arrays.asList(line.split(","));
+                        if(row_index >= startLatIndex && row_index <= endLatIndex) {
+                            row_strs = row_strs.subList(startLonIndex,endLonIndex + 1);
+                            if(j == 0) {//同一纬度范围，第一个经度范围
+                                row.add(row_strs);
+                            }else{//同一纬度范围，除了第一个经度范围
+                                row.get(row_index - startLatIndex).addAll(row_strs);
+                            }
+
+                        }
+                        row_index++;
+                    }
+
+                }
+
+                row_all.addAll(row);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        System.out.println("查询时间："+ (System.currentTimeMillis() - selectTime));
+
+        //开始抽希
+
+        return map_return;
+    }
+
+    /**
+     * 先将目标矩阵块查出来进行抽希，然后按条件进行截取
+     * @param gid_level
+     * @param startLat
+     * @param endLat
+     * @param startLon
+     * @param endLon
+     * @return
+     */
+    public Map<String, Object> statisticalQueryTest1(Integer gid_level, Double startLat,
+                                                    Double endLat, Double startLon, Double endLon) {
+        Map<String, Object> map_return = new HashMap<>();
+        String rowkey_prefix = "2018092903_0_";
+        //计算开始和结束纬度之间，需要在hbase中查询的所有rowkey的纬度拼接部分
+        List<String> rowkey_lat = RowKeyUtil.getRowKeyByLonOrLat(startLat,endLat);
+        //计算开始和结束经度之间，需要在hbase中查询的所有rowkey的经度拼接部分
+        List<String> rowkey_lon = RowKeyUtil.getRowKeyByLonOrLat(startLon,endLon);
+
+        List<List<String>> row_all = new ArrayList<>(); //每个纬度范围的数据块拼成最终的一个list，进行抽希
+        Connection conn = null;
+        Table table = null;
+        Long selectTime = 0l;
+        try {
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            TableName tableName = TableName.valueOf("weather_2018092903");
+            table = conn.getTable(tableName);
+            selectTime = System.currentTimeMillis();
+            for(int i = 0; i < rowkey_lat.size(); i++) {
+                String rowkey_lat_str = rowkey_lat.get(i);//获取一个rowkey中纬度的范围
+                List<Get> getList = new ArrayList<>();
+                List<List<String>> row = new ArrayList<>();//二维数组，存储一个纬度范围内的所有矩阵块,抽希前
+                List<List<String>> row_clean = new ArrayList<>();//二维数组，存储一个纬度范围内的所有矩阵块，抽希后
+                for(String rowkey_lon_str:rowkey_lon) {
+                    Get get = new Get(Bytes.toBytes(rowkey_prefix+rowkey_lat_str+"_"+rowkey_lon_str));
+                    get.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("Himawari8"));
+                    getList.add(get);
+                }
+                Result[] resarr = table.get(getList);//一个纬度范围内的所有矩阵块数据
+                int  startLatIndex,endLatIndex;//当前这个纬度范围内，在读取矩阵并转化为二维数组后的行起始索引
+                startLatIndex = 1;
+                endLatIndex = 1001;
+                //同一个纬度范围内，遍历所有经度范围的矩阵块
+                for (int j = 0; j < resarr.length; j++) {
+                    int startLonIndex, endLonIndex;//当前这个经度范围内，在读取矩阵并转化为二维数组后的行起始索引
+                    startLonIndex = 1;
+                    endLonIndex = 1001;
+                    Result result = resarr[j];
+                    BufferedReader br = new BufferedReader(
+                            new InputStreamReader(new ByteArrayInputStream(result.value())));
+                    String line;
+                    int row_index = 0;//按行读取hbase中的矩阵，记录当前读取行数,第一行索引为0
+                    while ((line = br.readLine()) != null) {
+                        List<String> row_strs = Arrays.asList(line.split(","));
+                        if(row_index >= startLatIndex && row_index <= endLatIndex) {
+                            row_strs = row_strs.subList(startLonIndex,endLonIndex + 1);
+                            if(j == 0) {//同一纬度范围，第一个经度范围
+                                row.add(row_strs);
+                            }else{//同一纬度范围，除了第一个经度范围
+                                row.get(row_index - startLatIndex).addAll(row_strs);
+                            }
+                        }
+                        row_index++;
+                    }
+                    //抽希后
+                    int cycle_number = row.size()/gid_level;//计算抽希需要循环多少次
+                    //开始抽希
+                    for(int n = 0; n < cycle_number; n++) {
+                        List<String> arr_temp1 = new ArrayList<>();
+                        for(int nn = 0; nn < cycle_number; nn++) {
+                            arr_temp1.add(row.get(n*gid_level).get(nn*gid_level));
+                        }
+                        row_clean.add(arr_temp1);
+                    }
+                }
+                row_all.addAll(row_clean);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        System.out.println("查询时间："+ (System.currentTimeMillis() - selectTime));
+        return map_return;
+
+    }
+
+}

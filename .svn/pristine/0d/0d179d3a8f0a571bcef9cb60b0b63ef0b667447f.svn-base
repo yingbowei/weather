@@ -1,0 +1,177 @@
+package com.youzidata.weather.service;
+
+import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.yarn.webapp.hamlet.HamletSpec._Label;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.data.hadoop.hbase.RowMapper;
+import org.springframework.stereotype.Service;
+
+import com.youzidata.weather.util.CSVUtil;
+import com.youzidata.weather.util.CreateZip;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.InputStreamReader;
+import java.text.DecimalFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.Map.Entry;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+@Service
+public class HbaseService {
+	@Autowired
+	private HbaseTemplate hbaseTemplate;
+
+	@Value("${CSVPath}")
+	private String CSVPath;
+
+	public Map<String, Object> getDateFromHbase(String startDate, Integer hour, String type, List<String> layers, Double startLat,
+			Double endLat, Double startLon, Double endLon) {
+		CSVUtil util = new CSVUtil();
+		long start = new Date().getTime();
+		long time = System.currentTimeMillis();
+		int total = 0;
+		List<String> listall = new ArrayList<>();
+		Map<String, List<String>> map5 = new LinkedHashMap<>();
+		Map<String, Long> sumChildLengthMap = new HashMap<>();
+		ExecutorService executor = Executors.newFixedThreadPool(layers.size());
+		for (String layer : layers) {
+			List<String> listlayer = new ArrayList<>();
+			executor.execute(new Runnable() {
+				@Override
+				public void run() {
+					System.out.println(layer);
+					String result = hbaseTemplate.get("weather_" + startDate, startDate + hour + "_" + layer, "cf",
+							type, new RowMapper<String>() {
+								@Override
+								public String mapRow(Result result, int rowNum) throws Exception {
+									BufferedReader br = new BufferedReader(
+											new InputStreamReader(new ByteArrayInputStream(result.value())));
+									String line;
+									int index = 0;
+									int startIndex = 0;
+									int endIndex = 0;
+									String fileName = CSVPath + time + "/" + layer + ".csv";
+									List<String> liresult = new ArrayList<>();
+									while ((line = br.readLine()) != null) {
+										if (!line.trim().equals("")) {
+											String[] arr = line.split(",");
+											if (index == 0) {
+
+												if (startLat == null || startLat.equals("")) {
+													startIndex = 1;
+													endIndex = arr.length;
+												} else {
+													for (int i = 0; i < arr.length; i++) {
+														if (i != 0) {
+															if (Double.parseDouble(arr[i]) > startLon
+																	&& startIndex < 1) {
+																startIndex = i - 1;
+															}
+															if (Double.parseDouble(arr[i]) >= endLon && endIndex < 1) {
+																endIndex = i + 1;
+															}
+														}
+													}
+												}
+											}
+											if (index != 0) {
+												if ((startLat == null || startLat.equals("")) || (Double.parseDouble(arr[0]) >= startLat
+														&& Double.parseDouble(arr[0]) <= endLat)) {
+													String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+													listlayer.addAll(Arrays.asList(aaa));
+													String lineRes = arr[0] + "," + StringUtils.join(aaa, ",");
+													liresult.add(lineRes);
+
+												}
+											} else {
+												String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+												String lineRes = "," + StringUtils.join(aaa, ",");
+												liresult.add(lineRes);
+											}
+										}
+										index++;
+										// }
+									}
+									File file = util.String2Csv(liresult, fileName);
+									sumChildLengthMap.put(System.currentTimeMillis() + "", file.length());
+									return "";
+								}
+							});
+
+				}
+			});
+			map5.put(layer, listlayer);
+		}
+
+		executor.shutdown();
+		while (true) {
+			if (executor.isTerminated()) {
+				System.out.println("所有的子线程都结束了！");
+				break;
+			}
+		}
+		long zipTime = System.currentTimeMillis();
+		String newFilePath = CSVPath + time + ".zip ";
+		String cmmand = "zip -r " + newFilePath  + time + "/";
+		String[] cmds = new String[3];
+		cmds[0] = "/bin/bash";
+		cmds[1] = "-c";
+		cmds[2] = "cd "+CSVPath +" && "+cmmand;
+		try {
+			Process a = Runtime.getRuntime().exec(cmds);
+			 a.waitFor();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+//		CreateZip.createZip(CSVPath + time , newFilePath);
+		long end = new Date().getTime();
+
+		List<List<Double>> li = new ArrayList<>();
+		for (Entry<String, List<String>> en : map5.entrySet()) {
+			List<String> qqq=en.getValue();
+			Collections.sort(qqq);
+			listall.addAll(en.getValue());
+			List<Double> Listlim = new ArrayList<>();
+			Listlim.add(Double.parseDouble(en.getValue().get(en.getValue().size()-1)));
+			Listlim.add(Double.parseDouble(en.getValue().get(0)));
+			li.add(Listlim);
+		}
+		Set<Entry<String, Long>> entrySet3 = sumChildLengthMap.entrySet();
+		long lenth = 0;
+		for (Entry<String, Long> map : entrySet3) {
+			lenth += map.getValue();
+		}
+		File newZipFile = new File(newFilePath);
+		String resultPath = "/loadFile?fileName="+time;
+		Map<String, Object> resultMap = new LinkedHashMap<>();
+		resultMap.put("total", listall.size());
+		resultMap.put("limitType", li);
+		resultMap.put("fileNum", 1);
+		resultMap.put("filePath", resultPath);
+		DecimalFormat dec = new DecimalFormat("0.0000");
+		resultMap.put("fileFormat", "ZIP");
+		resultMap.put("fileName", time + ".zip");
+		resultMap.put("fileSize", dec.format(newZipFile.length() / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		resultMap.put("decompressionFileSize", dec.format(lenth / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		long zipEndTime = System.currentTimeMillis();
+		System.out.println("压缩消耗     " + (zipEndTime - zipTime));
+		resultMap.put("sumTime", end - start);
+		return resultMap;
+	}
+}

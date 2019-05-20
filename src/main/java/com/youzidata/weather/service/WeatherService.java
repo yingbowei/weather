@@ -1,0 +1,27 @@
+//package com.youzidata.weather.service;
+//
+//import java.util.List;
+//
+//import org.springframework.beans.factory.annotation.Autowired;
+//import org.springframework.stereotype.Service;
+//import org.springframework.transaction.annotation.Transactional;
+//
+//import com.youzidata.weather.dao.WeatherDao;
+//import com.youzidata.weather.entity.ViewJsCdStationEntity;
+//
+///**
+// * @author ZhangZhiWu
+// * @version 创建时间：2019年1月16日 下午3:12:37
+// *
+// */
+//@Transactional(rollbackFor=Exception.class)
+//@Service
+//public class WeatherService {
+//
+//	@Autowired WeatherDao weatherDao;
+//
+//	public List<ViewJsCdStationEntity> selectViewJsCdStation(){
+//
+//		return weatherDao.selectViewJsCdStation();
+//	}
+//}

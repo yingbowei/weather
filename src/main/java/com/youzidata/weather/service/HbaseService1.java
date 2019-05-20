@@ -1,0 +1,668 @@
+package com.youzidata.weather.service;
+
+import com.youzidata.weather.dao.HbaseDao;
+import com.youzidata.weather.util.ListUtil;
+import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.*;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.data.hadoop.hbase.RowMapper;
+import org.springframework.data.hadoop.hbase.TableCallback;
+import org.springframework.stereotype.Service;
+
+import com.youzidata.weather.util.CSVUtil;
+import com.youzidata.weather.util.DoubleUtil;
+
+import java.io.*;
+import java.text.DecimalFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.Map.Entry;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+@Service
+public class HbaseService1 {
+
+	@Autowired
+	private HbaseTemplate hbaseTemplate;
+
+	@Autowired
+	private HbaseDao hbaseDao;
+
+	@Value("${CSVPath}")
+	private String CSVPath;
+
+	//用zip压缩
+	public Map<String, Object> getDateFromHbaseZip(String startDate, Integer hour, String type, Integer decimal,
+			List<String> layers, Double startLat, Double endLat, Double startLon, Double endLon) {
+		CSVUtil util = new CSVUtil();
+		DoubleUtil doubleUtil = new DoubleUtil();
+		long start = new Date().getTime();
+		long time = System.currentTimeMillis();
+		int total = 0;
+		List<String> listall = new ArrayList<>();
+		Map<String, List<String>> map5 = new LinkedHashMap<>();
+		Map<String, Long> sumChildLengthMap = new HashMap<>();
+		ExecutorService executor = Executors.newFixedThreadPool(layers.size());
+		List<Get> getList = new ArrayList<Get>();
+		for (String layer : layers) {// 把rowkey加到get里，再把get装到list中
+			Get get = new Get(Bytes.toBytes(startDate + hour + "_" + layer));
+			get.addColumn(Bytes.toBytes("cf"), Bytes.toBytes(type));
+			getList.add(get);
+		}
+		hbaseTemplate.execute("weather_" + startDate, new TableCallback<String>() {
+
+			@Override
+			public String doInTable(HTableInterface table) throws Throwable {
+				Result[] resarr = table.get(getList);
+				for (Result result : resarr) {
+					String rowkey = Bytes.toString(result.getRow());
+					String[] rowkeyarr = rowkey.split("_");
+					List<String> listlayer = new ArrayList<>();
+					executor.execute(new Runnable() {
+
+						@Override
+						public void run() {
+
+							BufferedReader br = new BufferedReader(
+									new InputStreamReader(new ByteArrayInputStream(result.value())));
+							String line;
+							int index = 0;
+							int startIndex = 0;
+							int endIndex = 0;
+							String fileName = CSVPath + time + "/" + rowkeyarr[1] + ".csv";
+							List<String> liresult = new ArrayList<>();
+							try {
+								while ((line = br.readLine()) != null) {
+									if (!line.trim().equals("")) {
+										String[] arr = line.split(",");
+										if (index == 0) {
+
+											if (startLat == null || startLat.equals("")) {
+												startIndex = 1;
+												endIndex = arr.length;
+											} else {
+												for (int i = 0; i < arr.length; i++) {
+													if (i != 0) {
+														if (Double.parseDouble(arr[i]) > startLon && startIndex < 1) {
+															startIndex = i - 1;
+														}
+														if (Double.parseDouble(arr[i]) >= endLon && endIndex < 1) {
+															endIndex = i + 1;
+														}
+													}
+												}
+											}
+										}
+										if (index != 0) {
+											if ((startLat == null || startLat.equals(""))
+													|| (Double.parseDouble(arr[0]) >= startLat
+															&& Double.parseDouble(arr[0]) <= endLat)) {
+												String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+												String aaastr = StringUtils.join(aaa, ",");
+												if (decimal != null) {
+													aaastr = doubleUtil.doubleDecimal(decimal, aaa);
+												}
+												listlayer.addAll(Arrays.asList(aaastr.split(",")));
+												String lineRes = arr[0] + "," + aaastr;
+												liresult.add(lineRes);
+
+											}
+										} else {
+											String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+											String lineRes = "," + StringUtils.join(aaa, ",");
+											liresult.add(lineRes);
+										}
+									}
+									index++;
+									// }
+								}
+							} catch (Exception e) {
+								e.printStackTrace();
+							}
+							File file = util.String2Csv(liresult, fileName);
+							sumChildLengthMap.put(System.currentTimeMillis() + "", file.length());
+
+						}
+					});
+					map5.put(rowkeyarr[1], listlayer);
+				}
+
+				return "";
+			}
+		});
+
+		executor.shutdown();
+		while (true) {
+			if (executor.isTerminated()) {
+				System.out.println("所有的子线程都结束了！");
+				break;
+			}
+		}
+		long zipTime = System.currentTimeMillis();
+		String newFilePath = CSVPath + time + ".zip ";
+		String cmmand = "zip -r " + newFilePath + time + "/";
+		String[] cmds = new String[3];
+		cmds[0] = "/bin/bash";
+		cmds[1] = "-c";
+		cmds[2] = "cd " + CSVPath + " && " + cmmand;
+		try {
+			Process a = Runtime.getRuntime().exec(cmds);
+			a.waitFor();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		// CreateZip.createZip(CSVPath + time , newFilePath);
+		long end = new Date().getTime();
+
+		List<List<Double>> li = new ArrayList<>();
+		for (Entry<String, List<String>> en : map5.entrySet()) {
+			List<String> qqq = en.getValue();
+			Collections.sort(qqq);
+			listall.addAll(en.getValue());
+			List<Double> Listlim = new ArrayList<>();
+			Listlim.add(Double.parseDouble(en.getValue().get(en.getValue().size() - 1)));
+			Listlim.add(Double.parseDouble(en.getValue().get(0)));
+			li.add(Listlim);
+		}
+		Set<Entry<String, Long>> entrySet3 = sumChildLengthMap.entrySet();
+		long lenth = 0;
+		for (Entry<String, Long> map : entrySet3) {
+			lenth += map.getValue();
+		}
+		File newZipFile = new File(newFilePath);
+		String resultPath = "/loadFile?fileName=" + time;
+		Map<String, Object> resultMap = new LinkedHashMap<>();
+		resultMap.put("total", listall.size());
+		resultMap.put("limitType", li);
+		resultMap.put("fileNum", 1);
+		resultMap.put("filePath", resultPath);
+		DecimalFormat dec = new DecimalFormat("0.0000");
+		resultMap.put("fileFormat", "ZIP");
+		resultMap.put("fileName", time + ".zip");
+		resultMap.put("fileSize", dec.format(newZipFile.length() / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		resultMap.put("decompressionFileSize", dec.format(lenth / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		resultMap.put("sumTime", end - start);
+		resultMap.put("selectTime", zipTime - start);
+		resultMap.put("zipTime", end - zipTime);
+		return resultMap;
+	}
+
+	//查询离单点最近的
+	public Object getDateFromHbaseOne(String startDate, Integer hour, String type, Integer decimal, List<String> layers,
+			Double lat, Double lon) {
+		ExecutorService executor = Executors.newFixedThreadPool(layers.size());
+		List<Map<String, Object>> li = new ArrayList<>();
+
+		for (String layer : layers) {
+			Map<String, Object> ma = new LinkedHashMap<>();
+			executor.execute(new Runnable() {
+				@Override
+				public void run() {
+					System.out.println(layer);
+					String result = hbaseTemplate.get("weather_" + startDate, startDate + hour + "_" + layer, "cf",
+							type, new RowMapper<String>() {
+								@Override
+								public String mapRow(Result result, int rowNum) throws Exception {
+									BufferedReader br = new BufferedReader(
+											new InputStreamReader(new ByteArrayInputStream(result.value())));
+									String line;
+									List<String> liresult = new ArrayList<>();
+									int index = 0;
+									double lonres = 0;
+									double latres = 0;
+									int lonIndex = 0;
+									int latIndex = 0;
+									String lineres = "";
+									while ((line = br.readLine()) != null) {
+										if (!line.trim().equals("")) {
+											String[] arr = line.split(",");
+											if (index == 0) {
+												for (int i = 0; i < arr.length; i++) {
+													if (i != 0) {
+														if (Double.parseDouble(arr[i]) > lon && lonIndex < 1) {
+															if (Math.abs(lon - Double.parseDouble(arr[i - 1])) < Math
+																	.abs(lon - Double.parseDouble(arr[i]))) {
+																lonres = Double.parseDouble(arr[i - 1]);
+																lonIndex = i - 1;
+															} else {
+																lonres = Double.parseDouble(arr[i]);
+																lonIndex = i;
+															}
+														}
+													}
+												}
+											} else if (index == 1) {
+												if (Double.parseDouble(arr[0]) > lat) {
+													latres = Double.parseDouble(arr[0]);
+												} else {
+													lineres = line;
+												}
+
+											} else {
+												if (Double.parseDouble(arr[0]) > lat) {
+													String[] arrfront = lineres.split(",");
+													if (Math.abs(lat - Double.parseDouble(arrfront[0])) < Math
+															.abs(lat - Double.parseDouble(arr[0]))) {
+														latres = Double.parseDouble(arrfront[0]);
+													} else {
+														latres = Double.parseDouble(arr[0]);
+													}
+													break;
+												} else {
+													lineres = line;
+												}
+											}
+										}
+										index++;
+									}
+									String[] arrsu = lineres.split(",");
+									String point = arrsu[lonIndex];
+									ma.put("lonres", lonres);
+									ma.put("latres", latres);
+									ma.put("point", point);
+									ma.put("layer", layer);
+									li.add(ma);
+									return "";
+								}
+							});
+
+				}
+			});
+
+		}
+
+		executor.shutdown();
+		while (true) {
+			if (executor.isTerminated()) {
+				System.out.println("所有的子线程都结束了！");
+				break;
+			}
+		}
+		return li;
+	}
+	
+	//用pigz压成tgz
+	public Map<String, Object> getDateFromHbaseTgz(String startDate, Integer hour, String type, Integer decimal,
+			List<String> layers, Double startLat, Double endLat, Double startLon, Double endLon) {
+		CSVUtil util = new CSVUtil();
+		DoubleUtil doubleUtil = new DoubleUtil();
+		long start = new Date().getTime();//统计时长-开始时间
+		long time = System.currentTimeMillis();//获取当前时间，用来组成生成的文件名
+		int total = 0;
+		List<String> listall = new ArrayList<>();
+		Map<String, List<String>> map5 = new LinkedHashMap<>();
+		Map<String, Long> sumChildLengthMap = new HashMap<>();
+		ExecutorService executor = Executors.newFixedThreadPool(layers.size());
+		List<Get> getList = new ArrayList<Get>();
+		for (String layer : layers) {// 把rowkey加到get里，再把get装到list中
+			Get get = new Get(Bytes.toBytes(startDate + hour + "_" + layer));
+			get.addColumn(Bytes.toBytes("cf"), Bytes.toBytes(type));
+			getList.add(get);
+		}
+		ExecutorService inservice = Executors.newFixedThreadPool(10);
+		Connection connection = null;
+		Table table = null;
+		TableName tablename = TableName.valueOf("weather_" + startDate);
+		try {
+			connection = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+			table = connection.getTable(tablename, inservice);
+			Result[] resarr = table.get(getList);
+			for (Result result : resarr) {
+				String rowkey = Bytes.toString(result.getRow());
+				String[] rowkeyarr = rowkey.split("_");
+				List<String> listlayer = new ArrayList<>();
+				executor.execute(new Runnable() {
+
+					@Override
+					public void run() {
+
+						BufferedReader br = new BufferedReader(
+								new InputStreamReader(new ByteArrayInputStream(result.value())));
+						String line;
+						int index = 0;
+						int startIndex = 0;
+						int endIndex = 0;
+						String fileName = CSVPath + time + "/" + rowkeyarr[1] + ".csv";
+						List<String> liresult = new ArrayList<>();//存储层数
+						liresult.add("start_"+rowkeyarr[1]);
+						try {
+							while ((line = br.readLine()) != null) {
+								if (!line.trim().equals("")) {
+									String[] arr = line.split(",");
+									if (index == 0) {
+
+										if (startLat == null || startLat.equals("")) {
+											startIndex = 1;
+											endIndex = arr.length;
+										} else {
+											for (int i = 0; i < arr.length; i++) {
+												if (i != 0) {
+													if (Double.parseDouble(arr[i]) > startLon && startIndex < 1) {
+														startIndex = i - 1;
+													}
+													if (Double.parseDouble(arr[i]) >= endLon && endIndex < 1) {
+														endIndex = i + 1;
+													}
+												}
+											}
+										}
+									}
+									if (index != 0) {
+										if ((startLat == null || startLat.equals(""))
+												|| (Double.parseDouble(arr[0]) >= startLat
+												&& Double.parseDouble(arr[0]) <= endLat)) {
+											String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+											String aaastr = StringUtils.join(aaa, ",");
+											if (decimal != null) {
+												aaastr = doubleUtil.doubleDecimal(decimal, aaa);
+											}
+											listlayer.addAll(Arrays.asList(aaastr.split(",")));
+											String lineRes = arr[0] + "," + aaastr;
+											liresult.add(lineRes);
+
+										}
+									} else {
+										String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+										String lineRes = "," + StringUtils.join(aaa, ",");
+										liresult.add(lineRes);
+									}
+								}
+								index++;
+								// }
+							}
+						} catch (Exception e) {
+							e.printStackTrace();
+						}
+						File file = util.String2Csv(liresult, fileName);
+						sumChildLengthMap.put(System.currentTimeMillis() + "", file.length());
+
+					}
+				});
+				map5.put(rowkeyarr[1], listlayer);
+			}
+		} catch (IOException e) {
+			e.printStackTrace();
+		} finally {
+			try {
+				table.close();
+				connection.close();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+//		hbaseTemplate.execute("weather_" + startDate, new TableCallback<String>() {
+//
+//			@Override
+//			public String doInTable(HTableInterface table) throws Throwable {
+
+
+//				return "";
+//			}
+//		});
+
+		executor.shutdown();
+		while (true) {
+			if (executor.isTerminated()) {
+				System.out.println("所有的子线程都结束了！");
+				break;
+			}
+		}
+		long zipTime = System.currentTimeMillis();
+		String newFilePath = CSVPath + time + ".tgz ";
+		
+		//tar cvf - 1547602177563 | pigz -1 -p 64 > 1547602177563.tgz
+		
+//		String cmmand = "zip -r " + newFilePath + time + "/";
+		String cmmand = "tar cvf - "+ time +" | pigz -1 -p 64 > " + newFilePath;
+		String[] cmds = new String[3];
+		cmds[0] = "/bin/bash";
+		cmds[1] = "-c";
+		cmds[2] = "cd " + CSVPath + " && " + cmmand;
+		try {
+			Process a = Runtime.getRuntime().exec(cmds);
+			a.waitFor();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		// CreateZip.createZip(CSVPath + time , newFilePath);
+		long end = new Date().getTime();
+
+		List<List<Double>> li = new ArrayList<>();
+		for (Entry<String, List<String>> en : map5.entrySet()) {
+			List<String> qqq = en.getValue();
+			Collections.sort(qqq);
+			listall.addAll(en.getValue());
+			List<Double> Listlim = new ArrayList<>();
+			Listlim.add(Double.parseDouble(en.getValue().get(en.getValue().size() - 1)));
+			Listlim.add(Double.parseDouble(en.getValue().get(0)));
+			li.add(Listlim);
+		}
+		Set<Entry<String, Long>> entrySet3 = sumChildLengthMap.entrySet();
+		long lenth = 0;
+		for (Entry<String, Long> map : entrySet3) {
+			lenth += map.getValue();
+		}
+		File newZipFile = new File(newFilePath);
+		String resultPath = "/loadFile?fileName=" + time;
+		Map<String, Object> resultMap = new LinkedHashMap<>();
+		resultMap.put("total", listall.size());
+		resultMap.put("limitType", li);
+		resultMap.put("fileNum", 1);
+		resultMap.put("filePath", resultPath);
+		DecimalFormat dec = new DecimalFormat("0.0000");
+		resultMap.put("fileFormat", "tgz");
+		resultMap.put("fileName", time + ".tgz");
+		resultMap.put("fileSize", dec.format(newZipFile.length() / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		resultMap.put("decompressionFileSize", dec.format(lenth / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		resultMap.put("sumTime", end - start);
+		resultMap.put("selectTime", zipTime - start);
+		resultMap.put("zipTime", end - zipTime);
+		return resultMap;
+	}
+
+	//如果要素是风，比较特殊，有U、V两个分量，单独调用此方法
+	public Map<String, Object> getDateFromHbaseTgz2(String startDate, Integer hour, String type, Integer decimal,
+												   List<String> layers, Double startLat, Double endLat, Double startLon, Double endLon) {
+		CSVUtil util = new CSVUtil();
+		DoubleUtil doubleUtil = new DoubleUtil();
+		long start = new Date().getTime();//统计时长-开始时间
+		long time = System.currentTimeMillis();//获取当前时间，用来组成生成的文件名
+		int total = 0;
+		List<String> listall = new ArrayList<>();
+		Map<String, List<String>> map5 = new LinkedHashMap<>();
+		Map<String, Long> sumChildLengthMap = new HashMap<>();
+		ExecutorService executor = Executors.newFixedThreadPool(layers.size());
+		List<Get> getList = new ArrayList<Get>();
+		//EDA（风）要素，需要拆成U和V，两种元素
+		String [] typeArr = new String[]{"U","V"};
+		for(String str:typeArr) {
+			for (String layer : layers) {// 把rowkey加到get里，再把get装到list中
+				Get get = new Get(Bytes.toBytes(startDate + hour + "_" + layer));
+				get.addColumn(Bytes.toBytes("cf"), Bytes.toBytes(str));
+				getList.add(get);
+			}
+		}
+		ExecutorService inservice = Executors.newFixedThreadPool(10);
+		Connection connection = null;
+		Table table = null;
+		TableName tablename = TableName.valueOf("weather_" + startDate);
+		try {
+			connection = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+			table = connection.getTable(tablename, inservice);
+			Result[] resarr = table.get(getList);
+			for (Result result : resarr) {
+				String rowkey = Bytes.toString(result.getRow());
+				String typeName = "";
+				boolean uvFlag = result.containsColumn(Bytes.toBytes("cf"), Bytes.toBytes("U"));
+				if(uvFlag) {
+					typeName = "U";
+				}else{
+					typeName = "V";
+				}
+				String[] rowkeyarr = rowkey.split("_");
+				List<String> listlayer = new ArrayList<>();
+				String finalTypeName = typeName;
+				executor.execute(new Runnable() {
+
+					@Override
+					public void run() {
+
+						BufferedReader br = new BufferedReader(
+								new InputStreamReader(new ByteArrayInputStream(result.value())));
+						String line;
+						int index = 0;
+						int startIndex = 0;
+						int endIndex = 0;
+						String fileName = CSVPath + time + "/" + finalTypeName + rowkeyarr[1] + ".csv";
+						List<String> liresult = new ArrayList<>();//存储层数
+						liresult.add("start_"+rowkeyarr[1]);
+						try {
+							while ((line = br.readLine()) != null) {
+								if (!line.trim().equals("")) {
+									String[] arr = line.split(",");
+									if (index == 0) {
+
+										if (startLat == null || startLat.equals("")) {
+											startIndex = 1;
+											endIndex = arr.length;
+										} else {
+											for (int i = 0; i < arr.length; i++) {
+												if (i != 0) {
+													if (Double.parseDouble(arr[i]) > startLon && startIndex < 1) {
+														startIndex = i - 1;
+													}
+													if (Double.parseDouble(arr[i]) >= endLon && endIndex < 1) {
+														endIndex = i + 1;
+													}
+												}
+											}
+										}
+									}
+									if (index != 0) {
+										if ((startLat == null || startLat.equals(""))
+												|| (Double.parseDouble(arr[0]) >= startLat
+												&& Double.parseDouble(arr[0]) <= endLat)) {
+											String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+											String aaastr = StringUtils.join(aaa, ",");
+											if (decimal != null) {
+												aaastr = doubleUtil.doubleDecimal(decimal, aaa);
+											}
+											listlayer.addAll(Arrays.asList(aaastr.split(",")));
+											String lineRes = arr[0] + "," + aaastr;
+											liresult.add(lineRes);
+
+										}
+									} else {
+										String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+										String lineRes = "," + StringUtils.join(aaa, ",");
+										liresult.add(lineRes);
+									}
+								}
+								index++;
+								// }
+							}
+						} catch (Exception e) {
+							e.printStackTrace();
+						}
+						File file = util.String2Csv(liresult, fileName);
+						sumChildLengthMap.put(System.currentTimeMillis() + "", file.length());
+
+					}
+				});
+				map5.put(rowkeyarr[1], listlayer);
+			}
+		} catch (IOException e) {
+			e.printStackTrace();
+		} finally {
+			try {
+				table.close();
+				connection.close();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+//		hbaseTemplate.execute("weather_" + startDate, new TableCallback<String>() {
+//
+//			@Override
+//			public String doInTable(HTableInterface table) throws Throwable {
+
+
+//				return "";
+//			}
+//		});
+
+		executor.shutdown();
+		while (true) {
+			if (executor.isTerminated()) {
+				System.out.println("所有的子线程都结束了！");
+				break;
+			}
+		}
+		long zipTime = System.currentTimeMillis();
+		String newFilePath = CSVPath + time + ".tgz ";
+
+		//tar cvf - 1547602177563 | pigz -1 -p 64 > 1547602177563.tgz
+
+//		String cmmand = "zip -r " + newFilePath + time + "/";
+		String cmmand = "tar cvf - "+ time +" | pigz -1 -p 64 > " + newFilePath;
+		String[] cmds = new String[3];
+		cmds[0] = "/bin/bash";
+		cmds[1] = "-c";
+		cmds[2] = "cd " + CSVPath + " && " + cmmand;
+		try {
+			Process a = Runtime.getRuntime().exec(cmds);
+			a.waitFor();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		// CreateZip.createZip(CSVPath + time , newFilePath);
+		long end = new Date().getTime();
+
+		List<List<Double>> li = new ArrayList<>();
+		for (Entry<String, List<String>> en : map5.entrySet()) {
+			List<String> qqq = en.getValue();
+			Collections.sort(qqq);
+			listall.addAll(en.getValue());
+			List<Double> Listlim = new ArrayList<>();
+			Listlim.add(Double.parseDouble(en.getValue().get(en.getValue().size() - 1)));
+			Listlim.add(Double.parseDouble(en.getValue().get(0)));
+			li.add(Listlim);
+		}
+		Set<Entry<String, Long>> entrySet3 = sumChildLengthMap.entrySet();
+		long lenth = 0;
+		for (Entry<String, Long> map : entrySet3) {
+			lenth += map.getValue();
+		}
+		File newZipFile = new File(newFilePath);
+		String resultPath = "/loadFile?fileName=" + time;
+		Map<String, Object> resultMap = new LinkedHashMap<>();
+		resultMap.put("total", listall.size());
+		resultMap.put("limitType", li);
+		resultMap.put("fileNum", 1);
+		resultMap.put("filePath", resultPath);
+		DecimalFormat dec = new DecimalFormat("0.0000");
+		resultMap.put("fileFormat", "tgz");
+		resultMap.put("fileName", time + ".tgz");
+		resultMap.put("fileSize", dec.format(newZipFile.length() / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		resultMap.put("decompressionFileSize", dec.format(lenth / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		resultMap.put("sumTime", end - start);
+		resultMap.put("selectTime", zipTime - start);
+		resultMap.put("zipTime", end - zipTime);
+		return resultMap;
+	}
+}

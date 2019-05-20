@@ -1,0 +1,76 @@
+package com.youzidata.weather.controller;
+
+import com.youzidata.weather.task.LoadSplitToHbaseTask;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * @Author: YingBoWei
+ * @Date: 2019-04-15 13:57
+ * @Description:
+ */
+@RestController
+@CrossOrigin
+public class LoadSplitDataController {
+    @Autowired
+    private LoadSplitToHbaseTask loadSplitToHbaseTask;
+
+    /**
+     * 读取单个nc文件，并且解析存入Hbase
+     * @param filePath  单个nc文件路径
+     * @return
+     */
+    @GetMapping("/loadSplit")
+    public Object loadSplit(@RequestParam(required=true)String  filePath) {
+        List<String> fileList = new ArrayList<>();
+        fileList.add(filePath);
+        Map<String, Object> resultMap = loadSplitToHbaseTask.split(fileList);
+        Map<String, Object> lastMap = new HashMap<>();
+        lastMap.put("resultcode", 200);
+        lastMap.put("resultMessage", "SUCCESS");
+        lastMap.put("data", resultMap);
+        return lastMap;
+    }
+
+    /**
+     * 读取某一文件夹下的所有nc文件，并且解析和存入Hbase
+     * @param filePath  文件夹路径
+     * @return
+     */
+    @GetMapping("/loadSplitDir")
+    public Object loadSplitDir(@RequestParam(required=true)String  filePath) {
+        //读取文件夹目录中的所有nc文件，统计获取所有nc文件路径的时间
+        System.out.println(filePath);
+        long startTime = System.currentTimeMillis();
+        System.out.println("-----"+"开始执行："+startTime);
+        List<String> fileList = new ArrayList<>();
+        File file = new File(filePath);
+        File[] listFiles = file.listFiles();
+        for(int i=0;i<listFiles.length;i++) {
+            String singlePath = listFiles[i].getPath();
+            String substring = singlePath.substring(singlePath.length()-2, singlePath.length());
+            if(listFiles[i].isFile() && "nc".equals(substring)) {
+                fileList.add(listFiles[i].getPath());
+            }
+        }
+        long readFile = System.currentTimeMillis();
+        System.out.println("-----"+"读文件地址的时间消耗:"+(readFile - startTime));
+
+        Map<String, Object> resultMap = loadSplitToHbaseTask.split(fileList);
+        Map<String, Object> lastMap = new HashMap<>();
+        lastMap.put("resultcode", 200);
+        lastMap.put("resultMessage", "SUCCESS");
+        lastMap.put("data", resultMap);
+        return lastMap;
+    }
+}

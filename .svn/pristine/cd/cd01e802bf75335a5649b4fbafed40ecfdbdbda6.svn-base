@@ -1,0 +1,196 @@
+package com.youzidata.weather.dao;
+
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.*;
+import org.apache.hadoop.hbase.io.compress.Compression;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.data.hadoop.hbase.TableCallback;
+import org.springframework.stereotype.Repository;
+
+import java.io.IOException;
+import java.util.Collection;
+import java.util.List;
+
+/**
+ * @Author: YingBoWei
+ * @Date: 2019-01-14 9:48
+ * @Description:
+ */
+@Repository
+public class HbaseDao {
+    @Autowired
+    private HbaseTemplate hbaseTemplate;
+    //多字段批量更新
+    public void updateTableBatch(final String tableName, final String rowKey, final String familyName, final String[] column, final String[] value)
+            throws IOException {
+        hbaseTemplate.execute(tableName, new TableCallback<String>() {
+
+            @Override
+            public String doInTable(HTableInterface table) throws Throwable {
+                Put put = new Put(Bytes.toBytes(rowKey));
+                for (int j = 0; j < column.length; j++) {
+                    put.add(Bytes.toBytes(familyName), Bytes.toBytes(column[j]),
+                            Bytes.toBytes(value[j]));
+                }
+                table.put(put);
+                return "ok";
+            }
+
+        });
+    }
+
+    //单个字段更新
+    public void updateTable(final String tableName, final String rowKey, final String familyName, final String column, final String value)
+            throws IOException {
+        hbaseTemplate.execute(tableName, new TableCallback<String>() {
+
+            @Override
+            public String doInTable(HTableInterface table) throws Throwable {
+                Put put = new Put(Bytes.toBytes(rowKey));
+                put.add(Bytes.toBytes(familyName), Bytes.toBytes(column),
+                        Bytes.toBytes(value));
+                table.put(put);
+                System.out.println("ok");
+                return "ok";
+            }
+
+        });
+    }
+
+    //写缓冲区 autoFlush,插入数据
+    public static void autoFlushInsert(String table_name, Connection conn, List<Put> puts, int putNum){
+        HTable table = null;
+        TableName tablename = TableName.valueOf(table_name);
+
+        try {
+            table = (HTable)conn.getTable(tablename);
+            table.setAutoFlushTo(false);//关闭自动清理缓冲区
+
+            for(int i = 1; i <= puts.size(); i++) {
+                table.put(puts.get(i-1));
+                if (i % putNum == 0) {
+                    //清理提交
+                    table.flushCommits();
+                }
+            }
+            table.flushCommits();
+        } catch (IOException e) {
+            System.out.println("插入报错");
+            e.printStackTrace();
+        }finally {
+            try {
+                table.close();
+            } catch (IOException e) {
+                System.out.println("table.close()");
+                e.printStackTrace();
+            }
+
+
+        }
+    }
+
+    /**
+     * 异步插入
+     * @param table_name
+     * @param conn
+     * @param puts
+     */
+    public static void mutatorInsert(String table_name, Connection conn, List<Put> puts) throws IOException {
+        final BufferedMutator.ExceptionListener listener = new BufferedMutator.ExceptionListener() {
+            @Override
+            public void onException(RetriesExhaustedWithDetailsException e, BufferedMutator mutator) {
+                for (int i = 0; i < e.getNumExceptions(); i++) {
+                    System.out.println("Failed to sent put " + e.getRow(i) + ".");
+                }
+            }
+        };
+        BufferedMutatorParams params = new BufferedMutatorParams(TableName.valueOf(table_name))
+                .listener(listener);
+        params.writeBufferSize(2 * 1024 * 1024);
+
+        final BufferedMutator mutator = conn.getBufferedMutator(params);
+        try {
+            mutator.mutate(puts);
+            mutator.flush();
+        } catch(Exception ex){
+            ex.printStackTrace();
+        }finally {
+            try {
+                mutator.close();
+            } catch (IOException e) {
+                System.out.println("mutator.close()");
+                e.printStackTrace();
+            }
+            try {
+                conn.close();
+            } catch (IOException e) {
+                System.out.println("conn.close()");
+                e.printStackTrace();
+            }
+        }
+    }
+
+    public static void createTable(Connection conn, String tableName) {
+        //Hbase建表
+        Admin admin = null;
+//        Connection conn = null;
+//        String tableName = "weather_txt";
+        try {
+            admin = conn.getAdmin();
+            if (!admin.isTableAvailable(TableName.valueOf(tableName))) {
+                HTableDescriptor hbaseTable = new HTableDescriptor(TableName.valueOf(tableName));
+                hbaseTable.addFamily(new HColumnDescriptor("cf"));
+                admin.createTable(hbaseTable);
+            }
+        } catch (IOException e) {
+            System.out.println("建表");
+            e.printStackTrace();
+        }finally{
+            try {
+                admin.close();
+            } catch (IOException e) {
+                System.out.println("admin.close();\n" +
+                        "                conn.close();");
+                e.printStackTrace();
+            }
+        }
+    }
+
+    /**
+     * snappy压缩建表
+     * @param conn
+     * @param tableName
+     * @throws Exception
+     */
+    public static void createTableSnappy(Connection conn, String tableName){
+        HBaseAdmin admin = null;
+        try {
+            admin = (HBaseAdmin) conn.getAdmin();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        try {
+            if (admin.tableExists(tableName)) {
+                return;
+            }
+            HTableDescriptor tableDesc = new HTableDescriptor(TableName.valueOf(tableName));
+            HColumnDescriptor hColumnDescriptor = new HColumnDescriptor("cf");
+            hColumnDescriptor.setCompressionType(Compression.Algorithm.SNAPPY);
+            hColumnDescriptor.setMaxVersions(1);
+            tableDesc.addFamily(hColumnDescriptor);
+            admin.createTable(tableDesc);
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                admin.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}

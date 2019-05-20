@@ -1,0 +1,33 @@
+package com.youzidata.weather.hbase;
+
+import com.alibaba.fastjson.JSONObject;
+import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+import java.util.Map;
+
+/**
+ * @Author: YingBoWei
+ * @Date: 2018-11-02 14:44
+ * @Description:
+ */
+public class HBaseBeanUtil {
+
+    /**
+     * List<Map<String,String>>转换为Put
+     * @param list
+     * @return
+     * @throws Exception
+     */
+    public static Put jsonToPut(List<JSONObject> list, String rowkey) throws Exception {
+        Put put = new Put(Bytes.toBytes(rowkey));
+        for(JSONObject json:list){
+                put.addColumn(Bytes.toBytes(json.getString("family")), Bytes.toBytes(json.getString("name")), Bytes.toBytes(json.getString("value")));
+        }
+        return put;
+    }
+}

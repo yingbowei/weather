@@ -1,0 +1,35 @@
+package com.youzidata.weather.controller;
+
+import com.youzidata.weather.task.LoadToHbaseTask;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+@RestController
+@CrossOrigin
+public class LoadDataController {
+
+    @Autowired
+    LoadToHbaseTask loadToHbaseTask;
+
+    @ResponseBody
+    @GetMapping(value="/testload")
+    public  Object testload(@RequestParam(required=true)String  filePath) {
+        return loadToHbaseTask.load(filePath);
+    }
+
+    @ResponseBody
+    @GetMapping(value="/testloaddir")
+    public  Object testloaddir(@RequestParam(required=true)String  filePath) {
+         loadToHbaseTask.test(filePath);
+         return "200";
+    }
+}

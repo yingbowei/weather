@@ -1,0 +1,73 @@
+//package com.youzidata.weather.hbase;
+//
+//
+//import org.apache.hadoop.conf.Configuration;
+//import org.apache.hadoop.hbase.client.Connection;
+//import org.apache.hadoop.hbase.client.ConnectionFactory;
+//import org.springframework.beans.factory.InitializingBean;
+//import org.springframework.beans.factory.annotation.Value;
+//import org.springframework.stereotype.Component;
+//import java.io.IOException;
+//
+///**
+// * @Author: YingBoW* @Date: 2018-11-01 14:58
+// * @Description:
+// */
+//@Component
+//public class HconnectionFactory implements InitializingBean{
+//
+//    public static Configuration configuration = new Configuration();
+//
+//    public static Connection connection;
+//
+//    public static String tableName;
+//
+//
+//    @Value("${hbase.master}")
+//    private String hBaseMaster;
+//
+//    @Value("${hbase.zookeeper.quorum}")
+//    private String zkQuorum;
+//
+//    @Value("${hbase.zookeeper.property.clientPort}")
+//    private String zkPort;
+//
+//    @Value("${zookeeper.znode.parent}")
+//    private String znode;
+//
+//    @Value("${hbase.client.pause}")
+//    private String hClientPause;
+//
+//    @Value("${hbase.client.retries.number}")
+//    private String hcrNumber;
+//
+//    @Value("${hbase.rpc.timeout}")
+//    private String hrTimeout;
+//
+//    @Value("${hbase.rootdir}")
+//    private String hBaseRootdir;
+//
+//    @Override
+//    public void afterPropertiesSet(){
+//        configuration.set("hbase.master", hBaseMaster);
+//        configuration.set("hbase.zookeeper.quorum", zkQuorum);
+//        configuration.set("hbase.zookeeper.property.clientPort", zkPort);
+//        configuration.set("zookeeper.znode.parent", znode);
+//        configuration.set("hbase.client.pause", hClientPause);
+//        configuration.set("hbase.client.retries.number", hcrNumber);
+//        configuration.set("hbase.rpc.timeout", hrTimeout);
+//        configuration.set("hbase.rootdir", hBaseRootdir);
+//        try {
+//            connection = ConnectionFactory.createConnection(configuration);
+//        } catch (IOException e) {
+//            e.printStackTrace ();
+//        }
+//        return new HbaseTemplate(configuration);
+//    }
+//
+//
+//
+//
+//
+//
+//}

@@ -1,0 +1,55 @@
+//package com.youzidata.weather.hbase;
+//
+//import com.alibaba.fastjson.JSONObject;
+//import org.apache.hadoop.hbase.TableName;
+//import org.apache.hadoop.hbase.client.*;
+//import org.springframework.stereotype.Component;
+//
+//import java.io.IOException;
+//import java.util.List;
+//
+///**
+// * @Author: YingBoWei
+// * @Date: 2018-11-02 13:09
+// * @Description:
+// */
+//@Component("hBaseDaoUtil")
+//public class HBaseDaoUtil {
+//
+//    // 关闭连接
+//    public static void close() {
+//        if (DataSourceConfig.connection != null) {
+//            try {
+//                DataSourceConfig.connection.close();
+//            } catch (IOException e) {
+//                e.printStackTrace();
+//            }
+//        }
+//    }
+//
+//    // 单行 保存方法
+//    public static void saveOnePut(List<JSONObject> list, String rowkey, String tableName){
+//
+//        try {
+//            Table table=DataSourceConfig.connection.getTable(TableName.valueOf(tableName));
+//            Put put=HBaseBeanUtil.jsonToPut(list,rowkey);
+//            table.put(put);
+//            table.close();
+//        }catch (IOException e) {
+//            e.printStackTrace();
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//        }
+//    }
+//
+//    // 多行 批量保存方法
+//    public static void saveSomePut(List<Put> puts, String tableName){
+//        try (Table table = DataSourceConfig.connection.getTable(TableName.valueOf(tableName)); Admin admin = DataSourceConfig.connection.getAdmin();){
+//            table.put(puts);
+//        }catch (IOException e) {
+//            e.printStackTrace();
+//        }
+//    }
+//
+//
+//}

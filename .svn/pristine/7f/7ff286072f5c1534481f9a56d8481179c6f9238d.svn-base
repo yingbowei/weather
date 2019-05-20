@@ -1,0 +1,58 @@
+package com.youzidata.weather.dao;
+
+import org.apache.hadoop.hbase.client.HTableInterface;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.data.hadoop.hbase.TableCallback;
+import org.springframework.stereotype.Repository;
+
+import java.io.IOException;
+
+/**
+ * @Author: YingBoWei
+ * @Date: 2019-01-14 9:48
+ * @Description:
+ */
+@Repository
+public class HbaseDao {
+    @Autowired
+    private HbaseTemplate hbaseTemplate;
+    //多字段批量更新
+    public void updateTableBatch(final String tableName, final String rowKey, final String familyName, final String[] column, final String[] value)
+            throws IOException {
+        hbaseTemplate.execute(tableName, new TableCallback<String>() {
+
+            @Override
+            public String doInTable(HTableInterface table) throws Throwable {
+                Put put = new Put(Bytes.toBytes(rowKey));
+                for (int j = 0; j < column.length; j++) {
+                    put.add(Bytes.toBytes(familyName), Bytes.toBytes(column[j]),
+                            Bytes.toBytes(value[j]));
+                }
+                table.put(put);
+                return "ok";
+            }
+
+        });
+    }
+
+    //单个字段更新
+    public void updateTable(final String tableName, final String rowKey, final String familyName, final String column, final String value)
+            throws IOException {
+        hbaseTemplate.execute(tableName, new TableCallback<String>() {
+
+            @Override
+            public String doInTable(HTableInterface table) throws Throwable {
+                Put put = new Put(Bytes.toBytes(rowKey));
+                put.add(Bytes.toBytes(familyName), Bytes.toBytes(column),
+                        Bytes.toBytes(value));
+                table.put(put);
+                System.out.println("ok");
+                return "ok";
+            }
+
+        });
+    }
+}

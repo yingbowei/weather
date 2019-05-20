@@ -1,0 +1,344 @@
+package com.youzidata.weather.service;
+
+import com.youzidata.weather.dao.HbaseDao;
+import com.youzidata.weather.util.ListUtil;
+import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.client.HTableInterface;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.yarn.webapp.hamlet.HamletSpec._Label;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.data.hadoop.hbase.RowMapper;
+import org.springframework.data.hadoop.hbase.TableCallback;
+import org.springframework.stereotype.Service;
+
+import com.youzidata.weather.util.CSVUtil;
+import com.youzidata.weather.util.CreateZip;
+import com.youzidata.weather.util.DoubleUtil;
+
+import java.io.*;
+import java.text.DecimalFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.Map.Entry;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+@Service
+public class HbaseService {
+	@Autowired
+	private HbaseTemplate hbaseTemplate;
+
+	@Autowired
+	private HbaseDao hbaseDao;
+
+	@Value("${CSVPath}")
+	private String CSVPath;
+
+	public Map<String, Object> getDateFromHbase(String startDate, Integer hour, String type, Integer decimal, List<String> layers, Double startLat,
+			Double endLat, Double startLon, Double endLon) {
+		CSVUtil util = new CSVUtil();
+		DoubleUtil doubleUtil=new DoubleUtil();
+		long start = new Date().getTime();
+		long time = System.currentTimeMillis();
+		int total = 0;
+		List<String> listall = new ArrayList<>();
+		Map<String, List<String>> map5 = new LinkedHashMap<>();
+		Map<String, Long> sumChildLengthMap = new HashMap<>();
+		ExecutorService executor = Executors.newFixedThreadPool(layers.size());
+		for (String layer : layers) {
+			List<String> listlayer = new ArrayList<>();
+			executor.execute(new Runnable() {
+				@Override
+				public void run() {
+					System.out.println(layer);
+					String result = hbaseTemplate.get("weather_" + startDate, startDate + hour + "_" + layer, "cf",
+							type, new RowMapper<String>() {
+								@Override
+								public String mapRow(Result result, int rowNum) throws Exception {
+									BufferedReader br = new BufferedReader(
+											new InputStreamReader(new ByteArrayInputStream(result.value())));
+									String line;
+									int index = 0;
+									int startIndex = 0;
+									int endIndex = 0;
+									String fileName = CSVPath + time + "/" + layer + ".csv";
+									List<String> liresult = new ArrayList<>();
+									while ((line = br.readLine()) != null) {
+										if (!line.trim().equals("")) {
+											String[] arr = line.split(",");
+											if (index == 0) {
+
+												if (startLat == null || startLat.equals("")) {
+													startIndex = 1;
+													endIndex = arr.length;
+												} else {
+													for (int i = 0; i < arr.length; i++) {
+														if (i != 0) {
+															if (Double.parseDouble(arr[i]) > startLon
+																	&& startIndex < 1) {
+																startIndex = i - 1;
+															}
+															if (Double.parseDouble(arr[i]) >= endLon && endIndex < 1) {
+																endIndex = i + 1;
+															}
+														}
+													}
+												}
+											}
+											if (index != 0) {
+												if ((startLat == null || startLat.equals("")) || (Double.parseDouble(arr[0]) >= startLat
+														&& Double.parseDouble(arr[0]) <= endLat)) {
+													String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+													String aaastr = StringUtils.join(aaa, ",");
+													if (decimal != null) {
+														aaastr = doubleUtil.doubleDecimal(decimal, aaa);
+													}
+													listlayer.addAll(Arrays.asList(aaastr.split(",")));
+													String lineRes = arr[0] + "," + aaastr;
+													liresult.add(lineRes);
+
+												}
+											} else {
+												String[] aaa = Arrays.copyOfRange(arr, startIndex, endIndex);
+												String lineRes = "," + StringUtils.join(aaa, ",");
+												liresult.add(lineRes);
+											}
+										}
+										index++;
+										// }
+									}
+									File file = util.String2Csv(liresult, fileName);
+									sumChildLengthMap.put(System.currentTimeMillis() + "", file.length());
+									return "";
+								}
+							});
+
+				}
+			});
+			map5.put(layer, listlayer);
+		}
+
+		executor.shutdown();
+		while (true) {
+			if (executor.isTerminated()) {
+				System.out.println("所有的子线程都结束了！");
+				break;
+			}
+		}
+		long zipTime = System.currentTimeMillis();
+		String newFilePath = CSVPath + time + ".zip ";
+		String cmmand = "zip -r " + newFilePath  + time + "/";
+		String[] cmds = new String[3];
+		cmds[0] = "/bin/bash";
+		cmds[1] = "-c";
+		cmds[2] = "cd "+CSVPath +" && "+cmmand;
+		try {
+			Process a = Runtime.getRuntime().exec(cmds);
+			 a.waitFor();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+//		CreateZip.createZip(CSVPath + time , newFilePath);
+		long end = new Date().getTime();
+
+		List<List<Double>> li = new ArrayList<>();
+		for (Entry<String, List<String>> en : map5.entrySet()) {
+			List<String> qqq=en.getValue();
+			Collections.sort(qqq);
+			listall.addAll(en.getValue());
+			List<Double> Listlim = new ArrayList<>();
+			Listlim.add(Double.parseDouble(en.getValue().get(en.getValue().size()-1)));
+			Listlim.add(Double.parseDouble(en.getValue().get(0)));
+			li.add(Listlim);
+		}
+		Set<Entry<String, Long>> entrySet3 = sumChildLengthMap.entrySet();
+		long lenth = 0;
+		for (Entry<String, Long> map : entrySet3) {
+			lenth += map.getValue();
+		}
+		File newZipFile = new File(newFilePath);
+		String resultPath = "/loadFile?fileName="+time;
+		Map<String, Object> resultMap = new LinkedHashMap<>();
+		resultMap.put("total", listall.size());
+		resultMap.put("limitType", li);
+		resultMap.put("fileNum", 1);
+		resultMap.put("filePath", resultPath);
+		DecimalFormat dec = new DecimalFormat("0.0000");
+		resultMap.put("fileFormat", "ZIP");
+		resultMap.put("fileName", time + ".zip");
+		resultMap.put("fileSize", dec.format(newZipFile.length() / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		resultMap.put("decompressionFileSize", dec.format(lenth / (1024 + 0.0) / (1024 + 0.0)) + " MB");
+		long zipEndTime = System.currentTimeMillis();
+		resultMap.put("sumTime", end - start);
+		resultMap.put("selectTime", zipTime - start);
+		resultMap.put("zipTime", end - zipTime);
+		return resultMap;
+	}
+
+	//测试用，查询Hbase数据,返回查到的二维数组
+	public List<List<String>> getDateFromHbaseTest(String startDate, Integer hour, String type, String layer, Double startLat, Double  endLat, Double startLon, Double endLon){
+		List<List<String>> result=new ArrayList<>();
+		result = hbaseTemplate.get("weather_" + startDate, startDate + hour + "_" + layer,"cf", type,
+				new RowMapper<List<List<String>>>() {
+					@Override
+					public List<List<String>> mapRow(Result result, int rowNum) throws Exception {
+						List<List<String>> temp=new ArrayList<>();
+						BufferedReader br = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(result.value())));
+						String line;
+						while ( (line = br.readLine()) != null ) {
+							if(!line.trim().equals("")){
+								temp.add(Arrays.asList(line.split(",")));
+							}
+						}
+						return temp;
+					}
+				});
+		return result;
+	}
+
+	//测试用，查询Hbase数据
+	public Map<String,List<String>> getTestDateFromHbase(String startDate, Integer hour, String type, List<String> layers, Double startLat, Double  endLat, Double startLon, Double endLon){
+		ExecutorService executor = Executors.newFixedThreadPool(layers.size());
+		Map<String,List<String>> map=new HashMap<>();
+		for(String layer : layers){
+			executor.execute(new Runnable() {
+				@Override
+				public void run() {
+//                    System.out.println(layer);
+					List<String> result = hbaseTemplate.get("weather_" + startDate, startDate + hour + "_" + layer,"cf", type,
+							new RowMapper<List<String>>() {
+								@Override
+								public List<String> mapRow(Result result, int rowNum) throws Exception {
+									List<String> temp=new ArrayList<>();
+									BufferedReader br = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(result.value())));
+									String line;
+									while ( (line = br.readLine()) != null ) {
+										if(!line.trim().equals("")){
+											temp.add(line);
+										}
+									}
+									return temp;
+								}
+							});
+					map.put(layer,result);
+				}
+			});
+		}
+
+		executor.shutdown();
+		while(true){
+			if(executor.isTerminated()){
+				System.out.println("所有的子线程都结束了！");
+				break;
+			}
+		}
+
+		return map;
+	}
+
+	//Hbase更新-测试
+	public void updateDataToHbase(String startDate, Integer hour, String type, List<String> layers, Double startLat, Double  endLat, Double startLon, Double endLon) throws IOException {
+		Map<String,List<String>> map=getTestDateFromHbase(startDate,hour,type,layers,startLat,endLat,startLon,endLon);
+		Map<String,List<List<String>>> map_data=new HashMap<>();//模拟请求参数传入的矩阵
+		for(Map.Entry<String,List<String>> m:map.entrySet()){//循环高度层
+			List<List<String>> list_request=new ArrayList<>();
+			List<List<String>> list_temp= ListUtil.listToTwoDimensionalArray(m.getValue());
+			list_request=list_temp.subList(0,list_temp.size()-2);
+			for(int i=0;i<list_request.size();i++){
+				list_request.get(i).subList(0,list_request.get(i).size()-2);
+			}
+			for(int i=1;i<list_request.size();i++){
+				for(int j=1;j<list_request.get(i).size();j++){
+					list_request.get(i).set(j,"0.0");
+				}
+			}
+			map_data.put(m.getKey(),list_request);
+		}
+		ExecutorService executor = Executors.newFixedThreadPool(3);
+
+		long startTime=new Date().getTime();
+		System.out.println("开始更新");
+		for(Map.Entry<String,List<List<String>>> m:map_data.entrySet()){//按高度层遍历
+			executor.execute(new Runnable() {//向线程池中添加线程
+				@Override
+				public void run() {//一定要捕获子线程异常，不然它出轨了都不知道
+					try {
+						List<List<String>> list_request=m.getValue();//模拟前端传过来的矩阵
+						int row_count=list_request.size();//行数
+						int column_count=list_request.get(0).size();//列数
+						String lon_1;
+						String lat_1;
+						String lon_2;
+						String lat_2;
+						lon_1=list_request.get(0).get(1);
+						lat_1=list_request.get(1).get(0);
+						lon_2=list_request.get(0).get(column_count-1);
+						lat_2=list_request.get(row_count-1).get(0);
+
+						List<List<String>> list_hbase=getDateFromHbaseTest(startDate,hour,type, m.getKey(),startLat,endLat,startLon,endLon);
+						int row_count_hbase=list_request.size();//行数
+						int column_count_hbase=list_request.get(0).size();//列数
+						List<Integer> lon_index=new ArrayList<>();
+						List<Integer> lat_index=new ArrayList<>();
+						String firstPoint=list_request.get(1).get(1);
+						String endPoint=list_request.get(list_request.size()-1).get(list_request.size()-1);
+						for(int i=0;i<list_hbase.size();i++){
+							if(lat_1.equals(list_hbase.get(i).get(0))||lat_2.equals(list_hbase.get(i).get(0))){
+								lat_index.add(i);
+							}
+						}
+						for(int j = 0; j< list_hbase.get(0).size(); j++){
+							if(lon_1.equals(list_hbase.get(0).get(j))||lon_2.equals(list_hbase.get(0).get(j))){
+								lon_index.add(j);
+							}
+						}
+						for(int i= lat_index.get(0);i<= lat_index.get(1);i++) {
+							for (int j=lon_index.get(0);j<= lon_index.get(1); j++) {
+								list_hbase.get(i).set(j,list_request.get(i).get(j));
+							}
+						}
+						StringBuffer sBuffer = new StringBuffer();
+						for(List<String> li:list_hbase){
+							sBuffer.append(StringUtils.join(li,","));
+							sBuffer.append("\n");
+						}
+
+						//更新Hbase
+						hbaseDao.updateTable("weather_"+startDate,startDate+hour+"_"+m.getKey(),"cf","HM",sBuffer.toString());
+
+
+
+					} catch (Exception e) {
+						e.printStackTrace();
+					}
+				}
+			});
+
+		}
+		executor.shutdown();
+		//等待子线程全都执行完，再执行后面的逻辑
+		try {
+			executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS);
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		}
+		long endTime=new Date().getTime();
+		System.out.println("更新时间："+(endTime-startTime));
+
+	}
+
+
+}

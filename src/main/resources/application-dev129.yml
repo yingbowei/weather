@@ -1,0 +1,40 @@
+#天津气象局部署配置文件
+spring:
+#服务名称
+  application:
+    name: weather-hbase
+#  jpa:
+#    database: oracle
+#    hibernate:
+#      ddl-auto: none
+#    show-sql: true
+#  datasource:
+#      driver-class-name: oracle.jdbc.OracleDriver
+#      url: jdbc:oracle:thin:@10.0.108.36:1521:weather
+#      username: weather
+#      password: YOUZIDATA
+#HBASE配置
+app:
+  datasource:
+    hdp:
+      fs.defaultFS: hdfs://hbase1:8020
+      zk-quorum: hbase3,hbase2,hbase1
+      zk-port: 2181
+      zookeeper.znode.parent: /hbase-unsecure
+    hbase:
+      master: 10.226.127.127:16000
+      rootdir: hdfs://hbase1:8020/apps/hbase/data
+
+server:
+  port: 9998
+  tomcat:
+    uri-encoding: UTF-8
+    
+CSVPath: "/hadoop/sdc/test/hbasezip/"
+IPADDR: "10.226.127.129"
+
+ScheduleParam:
+  #需要入库的文件目录
+  FilePath: ""
+  #记录已经入库的文件地址
+  TxtPath: ""

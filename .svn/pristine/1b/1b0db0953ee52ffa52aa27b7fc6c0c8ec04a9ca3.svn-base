@@ -1,0 +1,716 @@
+package com.youzidata.weather.task;
+
+import java.io.File;
+import java.io.IOException;
+import java.text.DecimalFormat;
+import java.util.*;
+import java.util.Map.Entry;
+import java.util.concurrent.*;
+
+import com.youzidata.weather.hbase.DataSourceConfig;
+import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.*;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.hadoop.hbase.HbaseSystemException;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.data.hadoop.hbase.TableCallback;
+import org.springframework.stereotype.Component;
+
+import com.alibaba.fastjson.JSONObject;
+import com.amazonaws.services.kms.model.transform.RetireGrantResultJsonUnmarshaller;
+
+import org.springframework.stereotype.Service;
+import ucar.ma2.InvalidRangeException;
+import ucar.nc2.Dimension;
+import ucar.nc2.NetcdfFile;
+import ucar.nc2.Variable;
+
+//@Component
+@Service
+public class LoadToHbaseTask {
+
+    @Autowired
+    private HbaseTemplate hbaseTemplate;
+
+	private static byte[] family = Bytes.toBytes("cf");
+
+    private byte[][] getSplitKeys(String date) {
+        String[] keys = new String[] { date+"40_", date+"80_", date+"120_", date+"160_", date+"200_"};
+        byte[][] splitKeys = new byte[keys.length][];
+        TreeSet<byte[]> rows = new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR);//升序排序
+        for (int i = 0; i < keys.length; i++) {
+            rows.add(Bytes.toBytes(keys[i]));
+        }
+        Iterator<byte[]> rowKeyIter = rows.iterator();
+        int i=0;
+        while (rowKeyIter.hasNext()) {
+            byte[] tempRow = rowKeyIter.next();
+            rowKeyIter.remove();
+            splitKeys[i] = tempRow;
+            i++;
+        }
+        return splitKeys;
+    }
+
+    public Map<String, Object> test(String  filePath){
+        System.out.println(filePath);
+		long startTime = System.currentTimeMillis();
+		System.out.println("-----"+"开始执行："+startTime);
+		List<String> fileList = new ArrayList<>();
+		File file = new File(filePath);
+		File[] listFiles = file.listFiles();
+		for(int i=0;i<listFiles.length;i++) {
+			String singlePath = listFiles[i].getPath();
+			String substring = singlePath.substring(singlePath.length()-2, singlePath.length());
+			if(listFiles[i].isFile() && "nc".equals(substring)) {
+				fileList.add(listFiles[i].getPath());
+			}
+		}
+
+		long readFile = System.currentTimeMillis();
+//		System.out.println("=========读文件时间消耗===="+(readFile - startTime));
+		System.out.println("-----"+"读文件时间消耗:"+(readFile - startTime));
+        String date = fileList.get(0).substring(fileList.get(0).length()-17, fileList.get(0).length()-7);
+
+		Admin admin = null;
+		Connection conn = null;
+		try {
+//            admin = DataSourceConfig.connection.getAdmin();
+			conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+			admin = conn.getAdmin();
+            if (!admin.isTableAvailable(TableName.valueOf("weather_"+date))) {
+                HTableDescriptor hbaseTable = new HTableDescriptor(TableName.valueOf("weather_"+date));
+                hbaseTable.addFamily(new HColumnDescriptor("cf"));
+                byte[][] splitKeys = getSplitKeys(date);
+                admin.createTable(hbaseTable,splitKeys);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }finally{
+			try {
+				admin.close();
+				conn.close();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+		System.out.println("-----"+"文件数量:"+fileList.size());
+//		System.out.println(fileList.size());
+//		System.out.println("=========================文件数量===========================");
+        Map<String, Object> resultMap = loadList(fileList);
+
+        long endTime = System.currentTimeMillis();
+		System.out.println("-----"+"程序结束:"+endTime);
+//        System.out.println(endTime);
+//        System.out.println("=========================");
+//        System.out.println(endTime-startTime);
+		System.out.println("-----"+"总共用时："+(endTime-startTime));
+		resultMap.put("sumTime", endTime-startTime);
+		return  resultMap;
+	}
+
+    public  Map<String,Object> loadList(List<String> fileList){
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Map<String, Long> writeMap = new HashMap<>();
+        Map<String, Long> nanMap = new HashMap<>();
+        Map<String, Long> readMap = new HashMap<>();
+        List<String> errorPath = new ArrayList<>();
+////		System.out.println(fileList.toString());
+        try {
+            for(String path :fileList ) {
+                executor.execute(new Runnable() {//向线程池中添加线程
+                    @Override
+                    public void run() {
+                        try {
+                            Boolean result = load(path,nanMap,writeMap,readMap);
+                            if(!result) {
+                                System.out.println("-----"+path+"批量添加失败");
+                                errorPath.add(path);
+                            }
+//                            Thread.sleep(1000);
+                        } catch (Exception e) {
+                            errorPath.add(path);
+                            e.printStackTrace();
+                        }
+                    }
+                });
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        executor.shutdown();
+        while(true){
+//        	try {
+//				Thread.sleep(5000);
+//			} catch (InterruptedException e) {
+//				e.printStackTrace();
+//			}
+            if(executor.isTerminated()){
+                System.out.println("-----所有的子线程都结束了！");
+                break;
+            }
+        }
+
+        if(errorPath != null && errorPath.size()>0) {
+            System.out.println("-----NC文件导入失败文件数"+errorPath.size());
+//            try {
+////				Thread.sleep(10000);
+//			} catch (InterruptedException e) {
+//				e.printStackTrace();
+//			}
+//            loadList(errorPath);
+        }
+        Set<Entry<String, Long>> entrySet = nanMap.entrySet();
+        long nnaTime = 0;
+        for(Entry<String, Long> entry : entrySet) {
+        	nnaTime += entry.getValue();
+        }
+        System.out.println("-----"+"解析共消耗:"+nnaTime);
+        long writeTime = 0;
+        Set<Entry<String, Long>> entrySet2 = writeMap.entrySet();
+        for(Entry<String, Long> entry : entrySet2) {
+        	writeTime += entry.getValue();
+        }
+        System.out.println("-----写文件共消耗:" +writeTime);
+        long readTime = 0;
+        Set<Entry<String, Long>> entrySet3 = readMap.entrySet();
+        for(Entry<String, Long> entry : entrySet3) {
+            readTime += entry.getValue();
+        }
+        System.out.println("-----读文件共消耗:" +readTime);
+        Map<String, Object> resultMap = new HashMap<String, Object>();
+        resultMap.put("readTime", readTime);
+        resultMap.put("analysisTime", nnaTime);
+        resultMap.put("writeTime", writeTime);
+        return resultMap;
+    }
+
+//	@Profile("prod_task")
+//    @Scheduled(cron = "47 12 * * * *")
+	public  boolean load(String path,Map<String, Long> anaMap,Map<String, Long> writeMap,Map<String, Long> readMap){
+        long start = new Date().getTime();
+        boolean res=false;
+        try {
+        	long startTime= System.currentTimeMillis();
+			NetcdfFile openNC = NetcdfFile.open(path);
+			long endTime = System.currentTimeMillis();
+			System.out.println("-----打开文件用时:"+(endTime - startTime));
+			String date = path.substring(path.length()-17, path.length()-7);
+			int hour = Integer.parseInt(path.substring(path.length()-6, path.length()-3));
+			res = parseFile(date,hour,openNC,anaMap,writeMap,readMap);
+			long end = System.currentTimeMillis();
+			System.out.println("-----解析加保存用时："+(end - endTime));
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+			return res;
+		}
+
+		return res;
+	}
+
+//	public static void main(String[] args) {
+//		String filePath = "C:\\maitu\\1233\\MODP_TJQX_ECNC_ADCN_2018020612-003.nc";
+//		String date = filePath.substring(filePath.length() - 17, filePath.length()-7);
+//		int hour = Integer.parseInt(filePath.substring(filePath.length() -6, filePath.length()-3));
+//		try {
+//			NetcdfFile open = NetcdfFile.open(filePath);
+//			boolean parseFile = parseFile(date,hour,open);
+//		} catch (IOException e) {
+//			e.printStackTrace();
+//		}
+//	}
+	/**
+	 *
+	 * @Title: parseFile
+	 * @author: Mr man
+	 * @Description: 具体解析文件的方法
+	 * @param: @param date   从文件名截取的时间+0000  组成   yyyyMMddHHmmss
+	 * @param: @param hour   小时范围
+	 * @param: @param newTime  具体存储的时间
+	 * @param: @param indexEnd  动态索引尾部
+	 * @param: @param openNC   具体NC文件
+	 * @param: @return
+	 * @return: boolean
+	 * @throws
+	 */
+	public  boolean parseFile(String date,int hour,NetcdfFile openNC,Map<String, Long> nanMap,Map<String, Long> wirteMap,Map<String, Long> readMap){
+        boolean res = true;
+        long analysisStartTime = System.currentTimeMillis();
+        List<Put> puts = new ArrayList<>();
+        try {
+            List<Variable> variables = openNC.getVariables();
+            Map<String, Object> demensionsMap = new HashMap<>();
+            List<Dimension> dimensions = openNC.getDimensions();
+            for (Dimension dimension : dimensions) {
+                if (dimension.getShortName().contains("lon")) {
+                    Variable latLonVariable = openNC.findVariable(dimension.getShortName());
+                    float[] latLonArray = parseFileOne(latLonVariable.getDimensions(), latLonVariable);
+                    StringBuilder stringBuilder = new StringBuilder();
+//                    stringBuilder.append(",");
+//                    stringBuilder.append(Arrays.toString(latLonArray).replace("[","").replace("]",""));
+                    for (int i = 0; i < latLonArray.length; i++) {
+                        stringBuilder.append(",");
+                        stringBuilder.append(latLonArray[i]);
+                    }
+                    stringBuilder.append("\n");
+                    demensionsMap.put(dimension.getShortName() + "_title", stringBuilder);
+                }else if(dimension.getShortName().contains("lat")){
+                    Variable latLonVariable = openNC.findVariable(dimension.getShortName());
+                    float[] latLonArray = parseFileOne(latLonVariable.getDimensions(), latLonVariable);
+                    demensionsMap.put(dimension.getShortName() + "_title", latLonArray);
+                }
+            }
+
+            int latThreelength = 0;
+            int lonThreelength = 0;
+            int lvThreeLength = 0;
+            int latTwoLength = 0;
+            int lonTwoLength = 0;
+            float[] latTwo = null;
+            float[] latThree = null;
+            List<Map<String, Object>> twoArrayList = new ArrayList<>();
+            List<Map<String, Object>> threeArrayList = new ArrayList<>();
+            List<Map<String, Object>> twoThreeArrayList = new ArrayList<>();
+//            Map<String, Variable> variableMap = new HashMap<>();
+            Map<String, Object> variableArrayMap = new HashMap<>();
+
+            Map<String,Future<List<String>>> threeMap = new HashMap<>();
+            Map<String,Future<String>> twoMap = new HashMap<>();
+
+            ExecutorService service = Executors.newFixedThreadPool(36);
+
+            for (Variable variable : variables) {
+                if (variable.getDimensions().size() == 3) {
+                    lvThreeLength = variable.getDimension(0).getLength();
+                    Dimension londimension = variable.getDimension(variable.getDimensions().size() - 1);
+                    String lonstr = demensionsMap.get(londimension.getShortName() + "_title").toString();
+                    Dimension latdimension = variable.getDimension(variable.getDimensions().size() - 2);
+                    float[] lat = (float[]) demensionsMap.get(latdimension.getShortName() + "_title");
+
+                    int[] org = new int[3];
+                    int[] msg = new int[3];
+
+                    for(int i=0;i<variable.getDimensions().size();i++) {
+                        org[i] = 0;
+                        msg[i] = variable.getDimensions().get(i).getLength();
+                    }
+                    float[][][] resultData = (float[][][]) variable.read(org, msg).copyToNDJavaArray();
+
+                    ParseThreeThread thread = new ParseThreeThread(resultData,lonstr,lat);
+                    threeMap.put(variable.getShortName(),service.submit(thread));
+
+                }else if(variable.getDimensions().size() == 2){
+                    Dimension londimension = variable.getDimension(variable.getDimensions().size() - 1);
+                    String lonstr = demensionsMap.get(londimension.getShortName() + "_title").toString();
+                    Dimension latdimension = variable.getDimension(variable.getDimensions().size() - 2);
+                    float[] lat = (float[]) demensionsMap.get(latdimension.getShortName() + "_title");
+
+                    int[] org = new int[variable.getDimensions().size()];
+                    int[] msg = new int[variable.getDimensions().size()];
+                    for(int i=0;i<variable.getDimensions().size();i++) {
+                        org[i] = 0;
+                        msg[i] = variable.getDimensions().get(i).getLength();
+                    }
+                    float[][] resultData = (float[][])variable.read(org, msg).copyToNDJavaArray();
+
+                    ParseTwoThread thread = new ParseTwoThread(resultData,lonstr,lat);
+                    twoMap.put(variable.getShortName(),service.submit(thread));
+                }
+            }
+            readMap.put(hour+"read", System.currentTimeMillis() - analysisStartTime);
+            System.out.println("==========数据读取时间======            "+(System.currentTimeMillis() - analysisStartTime));
+            analysisStartTime = System.currentTimeMillis();
+
+            service.shutdown();
+            while(true){
+                if(service.isTerminated()){
+                    break;
+                }
+            }
+            System.out.println("==========解析时间======                "+(System.currentTimeMillis() - analysisStartTime));
+            nanMap.put(hour+"ana", System.currentTimeMillis() - analysisStartTime);
+
+            long writeStartTime =System.currentTimeMillis();
+
+            ExecutorService inservice = Executors.newFixedThreadPool(5);
+
+            for(int i=0;i<lvThreeLength;i++){
+                String rowkey = date + hour + "_" + (i+1);
+                Put put = new Put(Bytes.toBytes(rowkey));
+                for(Entry<String,Future<List<String>>> entry : threeMap.entrySet()){
+                    put.addColumn(family, Bytes.toBytes(entry.getKey()), Bytes.toBytes(entry.getValue().get().get(i).toString()));
+                }
+//                inservice.submit(new Runnable() {
+//                    @Override
+//                    public void run() {
+//                        HTable table = null;
+//                        try {
+//                            table =  new HTable(hbaseTemplate.getConfiguration(),"weather_"+date);
+//                            table.setAutoFlush(false);
+//                            table.put(put);
+//                        } catch (IOException e) {
+//                            System.out.println(e.getLocalizedMessage());
+////                            e.printStackTrace();
+//                        }finally {
+//                            try {
+//                                table.close();
+//                            } catch (IOException e) {
+//                                e.printStackTrace();
+//                            }
+//                        }
+//                    }
+//                });
+                puts.add(put);
+            }
+
+            String rowkey = date + hour + "_" + 0;
+            Put put = new Put(Bytes.toBytes(rowkey));
+            for(Entry<String,Future<String>> entry : twoMap.entrySet()){
+                put.addColumn(family, Bytes.toBytes(entry.getKey()), Bytes.toBytes(entry.getValue().get().toString()));
+            }
+            puts.add(put);
+
+            for(int i =0;i<2;i++){
+                List<Put> list = puts.subList(i*puts.size()/2,(i+1)*puts.size()/2);
+                inservice.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        HTable table = null;
+                        try {
+                            table =  new HTable(hbaseTemplate.getConfiguration(),"weather_"+date);
+                            table.setAutoFlush(false);
+                            table.put(list);
+                        } catch (IOException e) {
+                            System.out.println(e.getLocalizedMessage());
+//                            e.printStackTrace();
+                        }finally {
+                            try {
+                                table.close();
+                            } catch (IOException e) {
+                                System.out.println(e.getLocalizedMessage());
+//                            e.printStackTrace();
+                            }
+                        }
+                    }
+                });
+            }
+
+            inservice.shutdown();
+            while(true){
+                if(inservice.isTerminated()){
+                    break;
+                }
+            }
+
+//            try {
+//                hbaseTemplate.execute("weather_"+date, new TableCallback<String>() {
+//
+//                    @Override
+//                    public String doInTable(HTableInterface table) throws Throwable {
+//                        table.setAutoFlush(false);
+//                        table.put(puts);
+//                        return null;
+//                    }
+//                });
+//            }catch(Exception ex) {
+//                System.out.println(ex.getMessage());
+//                res = false;
+//            }
+
+            long writeEndTime = System.currentTimeMillis();
+            System.out.println("===========================================");
+            System.out.println("==================单个文件写数据时间共消耗========            "+(writeEndTime - writeStartTime));
+            wirteMap.put(hour+"write", writeEndTime - writeStartTime);
+
+//
+//            for (Variable variable : variables) {
+//                Map<String, Object> newVariableMap = new HashMap<>();
+//                if (variable.getDimensions().size() > 1) {
+//                    List<Dimension> maxDimensions = variable.getDimensions();
+//                    if (maxDimensions.size() == 3) {
+//                        if (latThreelength == 0) {
+//                            Dimension dimension = maxDimensions.get(1);
+//                            String shortName = dimension.getShortName();
+//                            Variable lat = openNC.findVariable(shortName);
+//                            latThree = parseFileOne(lat.getDimensions(), lat);
+//                            latThreelength = maxDimensions.get(1).getLength();
+//                            lonThreelength = maxDimensions.get(2).getLength();
+//                            lvThreeLength = maxDimensions.get(0).getLength();
+//                        }
+//                        float[][][] array = parseFileThree(maxDimensions, variable);
+//                        variableArrayMap.put(variable.getShortName(), array);
+//                        newVariableMap.put(variable.getShortName(), variable);
+////                        variableMap.put(variable.getShortName(), variable);
+//                        threeArrayList.add(newVariableMap);
+//                    } else if (maxDimensions.size() == 2) {
+//                        if (latTwoLength == 0) {
+//                            latTwoLength = maxDimensions.get(0).getLength();
+//                            lonTwoLength = maxDimensions.get(1).getLength();
+//                            Dimension dimension = maxDimensions.get(0);
+//                            String shortName = dimension.getShortName();
+//                            Variable lat = openNC.findVariable(shortName);
+//                            latTwo = parseFileOne(lat.getDimensions(), lat);
+//                        }
+//                        float[][] array = parseFileTwo(maxDimensions, variable);
+//                        variableArrayMap.put(variable.getShortName(), array);
+//                        newVariableMap.put(variable.getShortName(), variable);
+////                        variableMap.put(variable.getShortName(), variable);
+//                        if (maxDimensions.get(0).getLength() == latThreelength && maxDimensions.get(1).getLength() == lonThreelength) {
+//                            twoThreeArrayList.add(newVariableMap);
+//                        } else {
+//                            twoArrayList.add(newVariableMap);
+//                        }
+//                    }
+//                }
+//            }
+//            variables.clear();
+//
+//            System.out.println("==========解析时间1======                        "+(System.currentTimeMillis() - analysisStartTime));
+//
+////			List<Put> puts = new ArrayList<>();
+//
+//            Map<String, StringBuilder> strOtherMap = new HashMap<>();
+//            for (Map<String, Object> variMap : twoThreeArrayList) {
+//                Set<Entry<String, Object>> entrySet = variMap.entrySet();
+//                for (Entry<String, Object> entry : entrySet) {
+//                    String key = entry.getKey();
+//                    Variable findVariable = openNC.findVariable(key);
+//                    Dimension dimension = findVariable.getDimension(findVariable.getDimensions().size() - 1);
+//                    StringBuilder keystr = new StringBuilder();
+//                    keystr.append(demensionsMap.get(dimension.getShortName() + "_title"));
+//                    strOtherMap.put(key, keystr);
+//                }
+//            }
+//
+//            //三维
+//            for (int i = 0; i < lvThreeLength; i++) {
+//                Map<String, StringBuilder> strMap = new HashMap<>();
+//                for (Map<String, Object> variMap : threeArrayList) {
+//                    Set<Entry<String, Object>> entrySet = variMap.entrySet();
+//                    for (Entry<String, Object> entry : entrySet) {
+//                        String key = entry.getKey();
+//                        Variable findVariable = openNC.findVariable(key);
+//                        Dimension dimension = findVariable.getDimension(findVariable.getDimensions().size() - 1);
+//                        StringBuilder keystr = new StringBuilder();
+//                        String lonstr = demensionsMap.get(dimension.getShortName() + "_title").toString();
+//                        keystr.append(lonstr);
+//                        strMap.put(key, keystr);
+//                    }
+//                }
+//                //每层每个指标矩阵
+//                for (int j = 0; j < latThreelength; j++) {
+//                    Set<Entry<String, StringBuilder>> entrySet = strMap.entrySet();
+//                    for (Entry<String, StringBuilder> entry : entrySet) {
+//                        entry.getValue().append(latThree[j]);
+//                    }
+//                    if (i == 0) {
+//                        Set<Entry<String, StringBuilder>> entryOtherSet = strOtherMap.entrySet();
+//                        for (Entry<String, StringBuilder> entry : entryOtherSet) {
+//                            entry.getValue().append(latThree[j]);
+//                        }
+//                    }
+//                    for (int k = 0; k < lonThreelength; k++) {
+//                        Set<Entry<String, StringBuilder>> set = strMap.entrySet();
+//                        for (Entry<String, StringBuilder> entry : set) {
+//                            entry.getValue().append(",");
+//                            String key = entry.getKey();
+//                            float[][][] object = (float[][][]) variableArrayMap.get(key);
+//                            entry.getValue().append(object[i][j][k]);
+//                        }
+//                        if (i == 0) {
+//                            Set<Entry<String, StringBuilder>> otherSet = strOtherMap.entrySet();
+//                            for (Entry<String, StringBuilder> entry : otherSet) {
+//                                String key = entry.getKey();
+//                                entry.getValue().append(",");
+//                                float[][] object = (float[][]) variableArrayMap.get(key);
+//                                entry.getValue().append(object[j][k]);
+//                            }
+//                        }
+//                    }
+//                    Set<Entry<String, StringBuilder>> lastSet = strMap.entrySet();
+//                    for (Entry<String, StringBuilder> entry : lastSet) {
+//                        entry.getValue().append("\n");
+//                    }
+//                    if (i == 0) {
+//                        Set<Entry<String, StringBuilder>> lastOtherSet = strOtherMap.entrySet();
+//                        for (Entry<String, StringBuilder> entry : lastOtherSet) {
+//                            entry.getValue().append("\n");
+//                        }
+//                    }
+//                }
+//
+//                String rowkey = date + hour + "_" + (i + 1);
+//                Put put = new Put(Bytes.toBytes(rowkey));
+//                Set<Entry<String, StringBuilder>> lastSet = strMap.entrySet();
+//                for (Entry<String, StringBuilder> entry : lastSet) {
+//                    put.addColumn(family, Bytes.toBytes(entry.getKey()), Bytes.toBytes(entry.getValue().toString()));
+//                }
+//                puts.add(put);
+//                if (i == 0) {
+//                    String rowKeyOther = date + hour + "_" + 0;
+//                    Put otherput = new Put(Bytes.toBytes(rowKeyOther));
+//                    Set<Entry<String, StringBuilder>> lastOtherSet = strOtherMap.entrySet();
+//                    for (Entry<String, StringBuilder> entry : lastOtherSet) {
+//                        otherput.addColumn(family, Bytes.toBytes(entry.getKey()), Bytes.toBytes(entry.getValue().toString()));
+//                    }
+//                    puts.add(otherput);
+//                }
+//            }
+//
+//            //二维
+//            Map<String, StringBuilder> strMap = new HashMap<>();
+//            for (Map<String, Object> variMap : twoArrayList) {
+//                Set<Entry<String, Object>> entrySet = variMap.entrySet();
+//                for (Entry<String, Object> entry : entrySet) {
+//                    String key = entry.getKey();
+//                    StringBuilder keystr = new StringBuilder();
+//                    Variable findVariable = openNC.findVariable(key);
+//                    Dimension dimension = findVariable.getDimension(findVariable.getDimensions().size() - 1);
+//                    String lonstr = demensionsMap.get(dimension.getShortName() + "_title").toString();
+//                    keystr.append(lonstr);
+//                    strMap.put(key, keystr);
+//                }
+//            }
+//            String rowkey = date + hour + "_" + 0;
+//            Put put = new Put(Bytes.toBytes(rowkey));
+//            for (int i = 0; i < latTwoLength; i++) {
+//                Set<Entry<String, StringBuilder>> entrySet = strMap.entrySet();
+//                for (Entry<String, StringBuilder> entry : entrySet) {
+//                    entry.getValue().append(latTwo[i]);
+//                }
+//                for (int j = 0; j < lonTwoLength; j++) {
+//                    for (Entry<String, StringBuilder> entry : entrySet) {
+//                        String key = entry.getKey();
+//                        entry.getValue().append(",");
+//                        float[][] object = (float[][]) variableArrayMap.get(key);
+//                        entry.getValue().append(object[i][j]);
+//                    }
+//                }
+//                for (Entry<String, StringBuilder> entry : entrySet) {
+//                    entry.getValue().append("\n");
+//                }
+//            }
+//            Set<Entry<String, StringBuilder>> entrySet = strMap.entrySet();
+//            for (Entry<String, StringBuilder> entry : entrySet) {
+//                put.addColumn(family, Bytes.toBytes(entry.getKey()), Bytes.toBytes(entry.getValue().toString()));
+//            }
+//            puts.add(put);
+        } catch (Exception ex){
+            ex.printStackTrace();
+            res = false;
+        }finally {
+            if(openNC!=null){
+                try {
+                    openNC.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+		return res;
+	}
+
+
+	/*
+	 * 解析三维
+	 */
+	public static float[][][] parseFileThree(List<Dimension> dimensions,Variable n) throws Exception {
+        int[] org = new int[3];
+        int[] msg = new int[3];
+        for(int i=0;i<dimensions.size();i++) {
+            org[i] = 0;
+            msg[i] = dimensions.get(i).getLength();
+        }
+        float[][][] resultData = new float[msg[0]][msg[1]][msg[2]];
+        int length = msg[0];
+        msg[0] = 1;
+        //分层读取文件  具体分的层数  目前是取决于第一维度的大小
+        for(int i=0;i<length;i++) {
+            org[0] = i;
+            float[][][] data = (float[][][])n.read(org, msg).copyToNDJavaArray();
+            for(int m=0;m<data.length;m++){
+                for(int l=0;l<data[m].length;l++){
+                    for(int p =0;p<data[m][l].length;p++) {
+                        resultData[i][l][p] = data[m][l][p];
+                    }
+                }
+            }
+        }
+        return resultData;
+    }
+
+
+	/*
+	 * 解析二维
+	 */
+	public float[][] parseFileTwo(List<Dimension> dimensions,Variable n) throws Exception {
+		int[] org = new int[dimensions.size()];
+		int[] msg = new int[dimensions.size()];
+		for(int i=0;i<dimensions.size();i++) {
+			org[i] = 0;
+			msg[i] = dimensions.get(i).getLength();
+		}
+		float[][] resultData = new float[msg[0]][msg[1]];
+		int length = msg[0];
+		msg[0] = 1;
+		//分层读取文件  具体分的层数  目前是取决于第一维度的大小
+		for(int i=0;i<length;i++) {
+			org[0] = i;
+			float[][] data = (float[][])n.read(org, msg).copyToNDJavaArray();
+			for(int m=0;m<data.length;m++){
+				for(int l=0;l<data[m].length;l++){
+						resultData[i][l] = data[m][l];
+				}
+			}
+		}
+		return resultData;
+	}
+
+    public String parseFileTwo1(String lon, float[] lat,List<Dimension> dimensions,Variable n){
+
+        StringBuilder keystr = new StringBuilder();
+        keystr.append(lon);
+
+        try {
+
+        int[] org = new int[dimensions.size()];
+        int[] msg = new int[dimensions.size()];
+        for(int i=0;i<dimensions.size();i++) {
+            org[i] = 0;
+            msg[i] = dimensions.get(i).getLength();
+        }
+        float[][] resultData = new float[msg[0]][msg[1]];
+        int length = msg[0];
+        msg[0] = 1;
+        //分层读取文件  具体分的层数  目前是取决于第一维度的大小
+        for(int i=0;i<length;i++) {
+            org[0] = i;
+            float[][] data = (float[][])n.read(org, msg).copyToNDJavaArray();
+            keystr.append(lat[i]);
+            for(int l=0;l<data[0].length;l++){
+                keystr.append(",");
+                keystr.append(data[0][l]);
+            }
+            keystr.append("\n");
+        }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return keystr.toString();
+    }
+
+	/*
+	 * 一维数组
+	 */
+	public static float[] parseFileOne(List<Dimension> dimensions,Variable n) throws Exception {
+	    float[] data = (float[])n.read().copyToNDJavaArray();
+		return data;
+	}
+}

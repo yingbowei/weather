@@ -1,0 +1,645 @@
+package com.youzidata.weather.controller;
+
+import com.youzidata.weather.dao.HbaseDao;
+import com.youzidata.weather.util.DateUtil;
+import com.youzidata.weather.util.FileUtil;
+import com.youzidata.weather.util.TxtUtil;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.*;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import ucar.nc2.NetcdfFile;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * @Author: YingBoWei
+ * @Date: 2019-04-19 10:48
+ * @Description:
+ */
+@RestController
+@CrossOrigin
+public class TextController {
+    @Autowired
+    private HbaseTemplate hbaseTemplate;
+
+    /**
+     * 单表，多rowkey，多线程，每一线程提交多个put
+     * @param path
+     * @return
+     */
+    @GetMapping("/txt1")
+    public Object txtToHbase(@RequestParam(required = true) String path,
+                             @RequestParam(required = true) int threadNum,
+                             @RequestParam(required = true) int rowkeyNum,
+                             @RequestParam(required = true) int putNum) {
+        Map<String, Object> map = new HashMap();
+        String str = TxtUtil.readFile(path);
+        //Hbase建表
+        Admin admin = null;
+        Connection conn = null;
+        String tableName = "weather_txt";
+        try {
+//            admin = DataSourceConfig.connection.getAdmin();
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            admin = conn.getAdmin();
+            if (!admin.isTableAvailable(TableName.valueOf(tableName))) {
+                HTableDescriptor hbaseTable = new HTableDescriptor(TableName.valueOf(tableName));
+                hbaseTable.addFamily(new HColumnDescriptor("cf"));
+                admin.createTable(hbaseTable);
+//                admin.createTable(hbaseTable);
+            }
+        } catch (IOException e) {
+            System.out.println("建表");
+            e.printStackTrace();
+        }finally{
+            try {
+                admin.close();
+                conn.close();
+            } catch (IOException e) {
+                System.out.println("admin.close();\n" +
+                        "                conn.close();");
+                e.printStackTrace();
+            }
+        }
+        List<Put> puts = new ArrayList();
+        for(int i = 0; i < rowkeyNum; i++) {
+            Put put = new Put(Bytes.toBytes("txt"+i));
+            put.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("txt"), Bytes.toBytes(str));
+            puts.add(put);
+        }
+//        HTable table = null;
+//        TableName tablename = TableName.valueOf(tableName);
+        Long writeStartTime = System.currentTimeMillis();//写入hbase开始时间
+        try {
+            ExecutorService executor = Executors.newFixedThreadPool(threadNum);
+//            HConnection connection = null;
+//            connection = HConnectionManager.createConnection(hbaseTemplate.getConfiguration());
+
+            final Connection conn_final = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            TableName tablename = TableName.valueOf(tableName);
+            Table table = conn_final.getTable(tablename);
+            try {
+                for(int i = 0; i < puts.size()/putNum; i++) {
+                    List<Put> temp = puts.subList(i*putNum,putNum*(i+1));
+                    executor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                table.put(temp);
+                                HbaseDao.mutatorInsert(tableName,conn_final,temp);
+                            } catch (IOException e) {
+                                System.out.println(e.getLocalizedMessage());
+                            }
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                try {
+                    table.close();
+                    conn_final.close();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            executor.shutdown();
+            while(true){
+                if(executor.isTerminated()){
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        map.put("入库时间",System.currentTimeMillis() - writeStartTime);
+        return map;
+    }
+
+    /**
+     * 单表，多rowkey，多线程，每一线程提交一个put
+     * @param path
+     * @param threadNum
+     * @param rowkeyNum
+     * @return
+     */
+    @GetMapping("/txt2")
+    public Object txtToHbase(@RequestParam(required = true) String path,
+                             @RequestParam(required = true) int threadNum,
+                             @RequestParam(required = true) int rowkeyNum) {
+        Map<String, Object> map = new HashMap();
+        System.out.println("rowkey数：" + rowkeyNum);
+        String str = TxtUtil.readFile(path);
+        //Hbase建表
+        Admin admin = null;
+        Connection conn = null;
+        String tableName = "weather_txt";
+        try {
+//            admin = DataSourceConfig.connection.getAdmin();
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            admin = conn.getAdmin();
+            if (!admin.isTableAvailable(TableName.valueOf(tableName))) {
+                HTableDescriptor hbaseTable = new HTableDescriptor(TableName.valueOf(tableName));
+                hbaseTable.addFamily(new HColumnDescriptor("cf"));
+                admin.createTable(hbaseTable);
+//                admin.createTable(hbaseTable);
+            }
+        } catch (IOException e) {
+            System.out.println("建表");
+            e.printStackTrace();
+        }finally{
+            try {
+                admin.close();
+                conn.close();
+            } catch (IOException e) {
+                System.out.println("admin.close();\n" +
+                        "                conn.close();");
+                e.printStackTrace();
+            }
+        }
+        List<Put> puts = new ArrayList();
+        for(int i = 0; i < rowkeyNum; i++) {
+            Put put = new Put(Bytes.toBytes("txt"+i));
+            put.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("txt"), Bytes.toBytes(str));
+            puts.add(put);
+        }
+//        HTable table = null;
+//        TableName tablename = TableName.valueOf(tableName);
+        Long writeStartTime = System.currentTimeMillis();//写入hbase开始时间
+        try {
+            ExecutorService executor = Executors.newFixedThreadPool(threadNum);
+            System.out.println("线程数：" + threadNum);
+            HConnection connection = null;
+            connection = HConnectionManager.createConnection(hbaseTemplate.getConfiguration());
+            HTableInterface table = connection.getTable(tableName);
+            table.setAutoFlush(false);
+            try {
+                for(Put put:puts) {
+                    executor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                table.put(put);
+                            } catch (IOException e) {
+                                System.out.println(e.getLocalizedMessage());
+//                            e.printStackTrace();
+                            }finally{
+
+                            }
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+
+            }
+            executor.shutdown();
+            while(true){
+                if(executor.isTerminated()){
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        map.put("入库时间",System.currentTimeMillis() - writeStartTime);
+        return map;
+    }
+
+    /**
+     * 批量提交
+     * @param path
+     * @param rowkeyNum
+     * @return
+     */
+    @GetMapping("/txt3")
+    public Object txtToHbase3(@RequestParam(required = true) String path,
+                             @RequestParam(required = true) int rowkeyNum,
+                              @RequestParam(required = true) int putNum) {
+        Map<String, Object> map = new HashMap();
+        System.out.println("rowkey数：" + rowkeyNum);
+        String str = TxtUtil.readFile(path);
+        //Hbase建表
+        Admin admin = null;
+        Connection conn = null;
+        String tableName = "weather_txt";
+        try {
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            admin = conn.getAdmin();
+            if (!admin.isTableAvailable(TableName.valueOf(tableName))) {
+                HTableDescriptor hbaseTable = new HTableDescriptor(TableName.valueOf(tableName));
+                hbaseTable.addFamily(new HColumnDescriptor("cf"));
+                admin.createTable(hbaseTable);
+//                admin.createTable(hbaseTable);
+            }
+        } catch (IOException e) {
+            System.out.println("建表");
+            e.printStackTrace();
+        }finally{
+            try {
+                admin.close();
+                conn.close();
+            } catch (IOException e) {
+                System.out.println("admin.close();\n" +
+                        "                conn.close();");
+                e.printStackTrace();
+            }
+        }
+        List<Put> puts = new ArrayList();
+        for(int i = 0; i < rowkeyNum; i++) {
+            Put put = new Put(Bytes.toBytes("txt"+i));
+            put.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("txt"), Bytes.toBytes(str));
+            puts.add(put);
+        }
+        Long writeStartTime = System.currentTimeMillis();//写入hbase开始时间
+        HConnection connection = null;
+        try {
+            connection = HConnectionManager.createConnection(hbaseTemplate.getConfiguration());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        HbaseDao.autoFlushInsert(tableName, connection,puts,putNum);
+        map.put("入库时间",System.currentTimeMillis() - writeStartTime);
+        return map;
+    }
+
+    /**
+     * 多线程,多表，多rowkey
+     * @param path
+     * @return
+     */
+    @GetMapping("/txt4")
+    public Object txtToHbase4(@RequestParam(required = true) String path,
+                              @RequestParam(required = true) int tableNum,
+                              @RequestParam(required = true) int rowkeyNum,
+                              @RequestParam(required = true) int threadNum) {
+        Map<String, Object> map = new HashMap();
+        String str = TxtUtil.readFile(path);
+
+        ExecutorService executor = Executors.newFixedThreadPool(threadNum);
+        List<String> tableNames = new ArrayList<>();
+        for(int i = 0; i  < tableNum; i++) {
+            tableNames.add("weather_txt" + i);
+        }
+        Long writeStartTime = System.currentTimeMillis();
+        for(String tableName:tableNames) {
+            //Hbase建表
+            Admin admin = null;
+            Connection conn = null;
+            try {
+                conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+                admin = conn.getAdmin();
+                if (!admin.isTableAvailable(TableName.valueOf(tableName))) {
+                    HTableDescriptor hbaseTable = new HTableDescriptor(TableName.valueOf(tableName));
+                    hbaseTable.addFamily(new HColumnDescriptor("cf"));
+                    admin.createTable(hbaseTable);
+                }
+
+                //生成rowkey
+                List<Put> puts = new ArrayList();
+                for(int i = 0; i < rowkeyNum; i++) {
+                    Put put = new Put(Bytes.toBytes("txt"+i));
+                    put.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("txt"), Bytes.toBytes(str));
+                    puts.add(put);
+                }
+                //插入Hbase
+                TableName tablename = TableName.valueOf(tableName);
+                Table table = conn.getTable(tablename);
+                table.put(puts);
+                table.close();
+            } catch (IOException e) {
+                System.out.println("建表");
+                e.printStackTrace();
+            }finally{
+                try {
+                    admin.close();
+                    conn.close();
+                } catch (IOException e) {
+                    System.out.println("admin.close();\n" +
+                            "                conn.close();");
+                    e.printStackTrace();
+                }
+            }
+        }
+        map.put("入库时间",System.currentTimeMillis() - writeStartTime);
+        return map;
+    }
+
+    /**
+     * snappy
+     * @param path
+     * @param threadNum
+     * @param rowkeyNum
+     * @param putNum
+     * @return
+     */
+    @GetMapping("/txt5")
+    public Object txtToHbase5(@RequestParam(required = true) String path,
+                             @RequestParam(required = true) int threadNum,
+                             @RequestParam(required = true) int rowkeyNum,
+                             @RequestParam(required = true) int putNum) {
+        Map<String, Object> map = new HashMap();
+        String str = TxtUtil.readFile(path);
+        //Hbase建表
+        Admin admin = null;
+        Connection conn = null;
+        String tableName = "weather_txt";
+        try {
+//            admin = DataSourceConfig.connection.getAdmin();
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            HbaseDao.createTableSnappy(conn, tableName);
+//            admin = conn.getAdmin();
+//            if (!admin.isTableAvailable(TableName.valueOf(tableName))) {
+//                HTableDescriptor hbaseTable = new HTableDescriptor(TableName.valueOf(tableName));
+//                hbaseTable.addFamily(new HColumnDescriptor("cf"));
+//                admin.createTable(hbaseTable);
+////                admin.createTable(hbaseTable);
+//            }
+        } catch (IOException e) {
+            System.out.println("建表");
+            e.printStackTrace();
+        }finally{
+            try {
+                conn.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        List<Put> puts = new ArrayList();
+        for(int i = 0; i < rowkeyNum; i++) {
+            Put put = new Put(Bytes.toBytes("txt"+i));
+            put.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("txt"), Bytes.toBytes(str));
+            puts.add(put);
+        }
+//        HTable table = null;
+//        TableName tablename = TableName.valueOf(tableName);
+        Long writeStartTime = System.currentTimeMillis();//写入hbase开始时间
+        try {
+            ExecutorService executor = Executors.newFixedThreadPool(threadNum);
+            HConnection connection = null;
+            connection = HConnectionManager.createConnection(hbaseTemplate.getConfiguration());
+            HTableInterface table = connection.getTable(tableName);
+//            table.setAutoFlush(false);
+            try {
+                //Put put:puts
+                for(int i = 0; i < puts.size()/putNum; i++) {
+                    List<Put> temp = puts.subList(i*putNum,putNum*(i+1));
+                    executor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                table.put(temp);
+                            } catch (IOException e) {
+                                System.out.println(e.getLocalizedMessage());
+//                            e.printStackTrace();
+                            }
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                try {
+                    table.close();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            executor.shutdown();
+            while(true){
+                if(executor.isTerminated()){
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        map.put("入库时间",System.currentTimeMillis() - writeStartTime);
+        return map;
+    }
+
+
+    /**
+     * 多线程，单表，批量提交
+     * @param path
+     * @param threadNum
+     * @param rowkeyNum
+     * @param putNum
+     * @param tableName
+     * @param snappySwitch  0：普通建表  1：snappy压缩格式建表
+     * @return
+     */
+    @GetMapping("/txt6")
+    public Object txtToHbase6(@RequestParam(required = true) String path,
+                              @RequestParam(required = true) int threadNum,
+                              @RequestParam(required = true) int rowkeyNum,
+                              @RequestParam(required = true) int putNum,
+                              @RequestParam(required = false, defaultValue = "0") int snappySwitch,
+                              @RequestParam(required = true) String tableName){
+        Map<String, Object> map = new HashMap<>();
+        ExecutorService executor = Executors.newFixedThreadPool(threadNum);//多线程
+        String str = TxtUtil.readFile(path);
+
+
+        Connection conn = null;
+//        String tableName = "weather_txt";
+        long writeStartTime = 0;//数据写入Hbase-开始时间
+        TableName tablename = TableName.valueOf(tableName);
+        Table table = null;
+        try {
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            if(snappySwitch == 0) {
+                //Hbase建表
+                HbaseDao.createTable(conn, tableName);
+            } else {
+                //Hbase 建表 snappy压缩
+                HbaseDao.createTableSnappy(conn, tableName);
+            }
+            //生成rowkey
+            List<Row> puts = new ArrayList();
+            for(int i = 0; i < rowkeyNum; i++) {
+                Put put = new Put(Bytes.toBytes("txt"+i));
+                put.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("txt"), Bytes.toBytes(str));
+//                put.setWriteToWAL(false);
+                puts.add(put);
+            }
+            //数据插入hbase
+//            table = conn.getTable(tablename);
+            table = conn.getTable(tablename,Executors.newFixedThreadPool(threadNum));
+            table.batch(puts);
+            writeStartTime = System.currentTimeMillis();
+//            for(int i = 0; i < puts.size()/putNum; i++) {
+//                List<Row> temp = puts.subList(i*putNum,putNum*(i+1));
+//                Table finalTable = table;
+//                executor.execute(new Runnable() {
+//                    @Override
+//                    public void run() {
+//                        try {
+//                            long startTime = System.currentTimeMillis();
+//                            finalTable.batch(temp);
+//                            System.out.println("线程耗时："+ (System.currentTimeMillis() - startTime));
+//                        } catch (Exception e) {
+//                            System.out.println(e.getLocalizedMessage());
+//                        }
+//                    }
+//                });
+//            }
+//            executor.shutdown();
+//            while(true){
+//                if(executor.isTerminated()){
+//                    System.out.println("-----所有的子线程都结束了！");
+//                    break;
+//                }
+//            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                conn.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            try {
+                table.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        map.put("入库时间：",System.currentTimeMillis() - writeStartTime);
+
+
+        return map;
+    }
+
+
+    /**
+     * 多线程插入多表
+     * @param path
+     * @param threadNum
+     * @param rowkeyNum
+     * @return
+     */
+    @GetMapping("/txt7")
+    public Object txtToHbase7(@RequestParam(required = true) String path,
+                              @RequestParam(required = true) int threadNum,
+                              @RequestParam(required = true) int rowkeyNum,
+//                              @RequestParam(required = true) int putNum,
+                              @RequestParam(required = true) int tableNum){
+        Map<String, Object> map = new HashMap<>();
+        ExecutorService executor = Executors.newFixedThreadPool(threadNum);//多线程
+        String str = TxtUtil.readFile(path);
+        Connection conn = null;
+        List<String> tableNames = new ArrayList<>();
+        for(int n = 0; n < tableNum; n++) {
+            tableNames.add("weather_txt" + n);
+        }
+//        String tableName = "weather_txt";
+        long writeStartTime = 0;//数据写入Hbase-开始时间
+        try {
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            //Hbase建表
+            for(String t:tableNames) {
+//                HbaseDao.createTable(conn, t);
+                //Hbase 建表 snappy压缩
+                HbaseDao.createTableSnappy(conn, t);
+            }
+            //生成rowkey
+            List<Put> puts = new ArrayList();
+            for(int i = 0; i < rowkeyNum; i++) {
+                Put put = new Put(Bytes.toBytes("txt"+i));
+                put.addColumn(Bytes.toBytes("cf"), Bytes.toBytes("txt"), Bytes.toBytes(str));
+                put.setWriteToWAL(false);
+                puts.add(put);
+            }
+            //数据插入hbase
+            List<Table> tables = new ArrayList();
+            for(String tableName:tableNames) {
+                TableName tablename = TableName.valueOf(tableName);
+                tables.add(conn.getTable(tablename));
+            }
+            writeStartTime = System.currentTimeMillis();
+            for(int i = 0; i < tables.size(); i++) {
+                Table finalTable = tables.get(i);
+                executor.execute(new Runnable() {
+                    @Override
+                    public void run() {
+
+                        try {
+                            long startTime = System.currentTimeMillis();
+                            finalTable.put(puts);
+                            finalTable.close();
+                            System.out.println("线程耗时："+ (System.currentTimeMillis() - startTime));
+                        } catch (IOException e) {
+                            System.out.println(e.getLocalizedMessage());
+                        }
+                    }
+                });
+            }
+            executor.shutdown();
+            while(true){
+                if(executor.isTerminated()){
+                    System.out.println("-----所有的子线程都结束了！");
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                conn.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        map.put("入库时间：",System.currentTimeMillis() - writeStartTime);
+
+
+        return map;
+    }
+
+    @GetMapping("/getArr")
+    public Object getArr() {
+        double [][] f = new double [3][3];
+        for(int i = 0; i < f.length; i++) {
+            for(int j = 0; j < f[i].length; j++) {
+                f[i][j] = Math.random()*100.0;
+            }
+        }
+        return f;
+    }
+
+    @GetMapping("/testGetFile")
+    public Object getFile(String dirPath, String startDate, String endDate) {
+        List<File> result = FileUtil.getNewestFileAndNoUserId(dirPath, startDate, endDate);
+        List<String> listStr = new ArrayList<>();
+        for(File f:result) {
+            listStr.add(f.getPath());
+            System.out.println(f.getPath());
+        }
+        Map<String, Object> map = new HashMap<>();
+        map.put("文件数量", listStr.size());
+        map.put("文件名列表", listStr);
+        return map;
+    }
+}

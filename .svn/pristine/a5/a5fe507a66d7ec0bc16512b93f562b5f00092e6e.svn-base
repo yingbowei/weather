@@ -1,0 +1,139 @@
+package com.youzidata.weather.util;
+
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStreamWriter;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 
+ * 类名称：CSVUtil   
+ * 类描述：生成CSV文件
+ * 创建人：manhaiying
+ * 创建时间：2018年12月24日 上午9:34:06      
+ * @version  V1.0
+ *
+ */
+import org.springframework.util.FileCopyUtils;
+
+public class CSVUtil {
+	public File String2Csv(List<String> lineresult, String filePath) {
+		File file = null;
+		try {
+			file = new File(filePath);
+			if (!file.getParentFile().exists()) { // 如果父目录不存在，创建父目录
+				file.getParentFile().mkdirs();
+			}
+			BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
+			for (String str : lineresult) {
+				out.write(str);
+				out.newLine();
+			}
+			out.flush();
+			out.close();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		return file;
+	}
+
+	public static File DoubleArray2Csv(double[][] result, double lat0, double lon0, double lat1, double lon1,
+			String filePath, double step, Integer stepSize) {
+		File file = null;
+		try {
+			file = new File(filePath);
+			if (!file.getParentFile().exists()) { // 如果父目录不存在，创建父目录
+				file.getParentFile().mkdirs();
+			}
+			if (file.exists()) { // 如果已存在,删除旧文件
+				file.delete();
+			}
+			file.createNewFile();
+			BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
+
+			for (int i = 0; i < (lon1 - lon0) * stepSize + 1; i++) {
+				out.write("," + String.valueOf(lon0 + step * i));
+
+			}
+			out.newLine();
+
+			for (int i = 0; i < result.length; i++) {
+				out.write(String.valueOf(lat0 + step * i));
+				for (int j = 0; j < result[i].length; j++) {
+					out.write("," + String.valueOf(result[i][j]));
+				}
+				out.newLine();
+			}
+			out.flush();
+			out.close();
+
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		return file;
+	}
+
+	public static File Array2CSV(ArrayList<ArrayList<String>> data, String path) {
+		File file = null;
+		try {
+			file = new File(path);
+			if (!file.getParentFile().exists()) { // 如果父目录不存在，创建父目录
+				file.getParentFile().mkdirs();
+			}
+			if (file.exists()) { // 如果已存在,删除旧文件
+				file.delete();
+			}
+			file.createNewFile();
+			BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
+			for (int i = 0; i < data.size(); i++) {
+				ArrayList<String> onerow = data.get(i);
+				for (int j = 0; j < onerow.size(); j++) {
+					out.write(DelQuota(onerow.get(j)));
+					if (j != onerow.size() - 1) {
+						out.write(",");
+					}
+					out.write(",");
+				}
+				// out.newLine();
+			}
+			out.flush();
+			out.close();
+
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		return file;
+
+	}
+
+	public static String DelQuota(String str) {
+		String result = str;
+		String[] strQuota = { "~", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "`", ";", "'", ",", "/", ":", "/,",
+				"<", ">", "?" };
+		for (int i = 0; i < strQuota.length; i++) {
+			if (result.indexOf(strQuota[i]) > -1)
+				result = result.replace(strQuota[i], "");
+		}
+		return result;
+	}
+
+	public static void main(String[] args) {
+		File file = new File("Q://222.csv");
+		System.out.println(fileToBinStr(file).length);
+	}
+
+	public static byte[] fileToBinStr(File file) {
+		try {
+			InputStream fis = new FileInputStream(file);
+			byte[] bytes = FileCopyUtils.copyToByteArray(fis);
+			return bytes;
+		} catch (Exception ex) {
+			throw new RuntimeException("transform file into bin String 出错", ex);
+		}
+	}
+
+}

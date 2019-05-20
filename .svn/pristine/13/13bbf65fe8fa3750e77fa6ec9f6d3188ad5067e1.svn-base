@@ -1,0 +1,108 @@
+package com.datong.web.util;
+
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+/*
+ * 检查参数
+ */
+public class CheckParamUtil {
+
+	//判断日期格式
+	public static boolean isValidDate(String str) {
+		boolean convertSuccess = true;
+		SimpleDateFormat format = new SimpleDateFormat("yyyyMMddHHmmss");
+		try {
+			// 设置lenient为false.
+			format.setLenient(false);
+			format.parse(str);
+		} catch (ParseException e) {
+			convertSuccess = false;
+		}
+		return convertSuccess;
+	}
+
+	//判断日期是否超时
+	public static boolean overDate(String startdate) {
+		boolean flag = true;
+
+		SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmmss");
+
+		Long now = new Date().getTime();
+
+		try {
+			if (sdf.parse(startdate).getTime() > now) {
+				flag = false;
+			}
+
+		} catch (ParseException e) {
+			e.printStackTrace();
+		}
+
+		return flag;
+	}
+	
+	//获取截止时间
+	public static String getenddate(String startdate,int day){
+		String enddate = "";
+		
+		SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmmss");
+		Calendar cal = Calendar.getInstance();
+		try {
+			cal.setTime(sdf.parse(startdate));
+			cal.add(Calendar.DATE, day-1);
+			cal.set(Calendar.HOUR_OF_DAY, 23);
+			cal.set(Calendar.MINUTE, 59);
+			cal.set(Calendar.SECOND, 59);
+			
+			if(cal.getTimeInMillis()>new Date().getTime()){
+				enddate = sdf.format(new Date());
+			}else{
+				enddate = sdf.format(cal.getTime());
+			}
+//			System.out.println(enddate);
+			
+		} catch (ParseException e) {
+			e.printStackTrace();
+		}
+		
+		return enddate;
+	}
+	
+	public static boolean checkPeriod(String period){
+		boolean flag = true;
+		
+		if(!period.equals("daily") && !period.equals("hourly") &&!period.equals("minute")){
+			return false;
+		}
+		
+		return flag;
+	}
+	
+	public static Map<String,String> getErrorMap(String code){
+		Map<String,String> map = new HashMap<String,String>();
+		map.put("resultcode", code);
+		map.put("reason", ErrorMessage.getMessage(code));
+		return map;
+	}
+	
+	public static Map<String,Object> getsuccess(Object data){
+		Map<String,Object> map = new LinkedHashMap<String,Object>();
+		map.put("resultcode", "200");
+		map.put("reason", "成功");
+		map.put("data", data);
+		return map;
+	}
+	
+	public static Map<String,Object> getsqlsuccess(){
+		Map<String,Object> map = new LinkedHashMap<String,Object>();
+		map.put("resultcode", "200");
+		map.put("reason", "成功");
+		return map;
+	}
+}

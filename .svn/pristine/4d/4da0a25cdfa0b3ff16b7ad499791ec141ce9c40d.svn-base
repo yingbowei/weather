@@ -1,0 +1,488 @@
+package com.youzidata.weather.task;
+
+import java.io.File;
+import java.io.IOException;
+import java.text.DecimalFormat;
+import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import com.youzidata.weather.hbase.HBaseDaoUtil;
+import com.youzidata.weather.hbase.DataSourceConfig;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.HTableInterface;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.data.hadoop.hbase.TableCallback;
+import org.springframework.stereotype.Component;
+
+import com.alibaba.fastjson.JSONObject;
+
+import org.springframework.stereotype.Service;
+import ucar.nc2.Dimension;
+import ucar.nc2.NetcdfFile;
+import ucar.nc2.Variable;
+
+//@Component
+@Service
+public class LoadToHbaseTask {
+
+    @Autowired
+    private HbaseTemplate hbaseTemplate;
+
+	private static byte[] family = Bytes.toBytes("cf");
+
+    private byte[][] getSplitKeys(String date) {
+        String[] keys = new String[] { date+"4_", date+"8_", date+"12_", date+"16_", date+"20_"};
+        byte[][] splitKeys = new byte[keys.length][];
+        TreeSet<byte[]> rows = new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR);//升序排序
+        for (int i = 0; i < keys.length; i++) {
+            rows.add(Bytes.toBytes(keys[i]));
+        }
+        Iterator<byte[]> rowKeyIter = rows.iterator();
+        int i=0;
+        while (rowKeyIter.hasNext()) {
+            byte[] tempRow = rowKeyIter.next();
+            rowKeyIter.remove();
+            splitKeys[i] = tempRow;
+            i++;
+        }
+        return splitKeys;
+    }
+
+    public void test(String  filePath){
+		long startTime = System.currentTimeMillis();
+		System.out.println(startTime);
+		List<String> fileList = new ArrayList<>();
+		File file = new File(filePath);
+		File[] listFiles = file.listFiles();
+		for(int i=0;i<listFiles.length;i++) {
+			String singlePath = listFiles[i].getPath();
+			String substring = singlePath.substring(singlePath.length()-2, singlePath.length());
+			if(listFiles[i].isFile() && "nc".equals(substring)) {
+				fileList.add(listFiles[i].getPath());
+			}
+		}
+
+        String date = fileList.get(0).substring(fileList.get(0).length()-17, fileList.get(0).length()-7);
+
+        try {
+            Admin admin = DataSourceConfig.connection.getAdmin();
+            if (!admin.isTableAvailable(TableName.valueOf("weather_"+date))) {
+                HTableDescriptor hbaseTable = new HTableDescriptor(TableName.valueOf("weather_"+date));
+                hbaseTable.addFamily(new HColumnDescriptor("cf"));
+                byte[][] splitKeys = getSplitKeys(date);
+                admin.createTable(hbaseTable,splitKeys);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        loadList(fileList);
+
+        long endTime = System.currentTimeMillis();
+        System.out.println(endTime);
+        System.out.println("=========================");
+        System.out.println(endTime-startTime);
+		System.out.println("共计"+(endTime-startTime));
+	}
+
+    public  void loadList(List<String> fileList){
+        ExecutorService executor = Executors.newFixedThreadPool(6);
+        List<String> errorPath = new ArrayList<>();
+//		System.out.println(fileList.toString());
+        try {
+            for(String path :fileList ) {
+                executor.execute(new Runnable() {//向线程池中添加线程
+                    @Override
+                    public void run() {//一定要捕获子线程异常，不然它出轨了都不知道
+                        try {
+                            Boolean result = load(path);
+                            if(!result) {
+                                System.out.println(path+"               批量添加失败");
+                                errorPath.add(path);
+                            }
+                        } catch (Exception e) {
+                            errorPath.add(path);
+                            e.printStackTrace();
+                        }
+                    }
+                });
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        executor.shutdown();
+        while(true){
+            if(executor.isTerminated()){
+                System.out.println("所有的子线程都结束了！");
+                break;
+            }
+        }
+//		//等待子线程全都执行完，再执行后面的逻辑
+//		try {
+//			executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS);
+//		} catch (InterruptedException e) {
+//			e.printStackTrace();
+//		}
+
+        if(errorPath != null && errorPath.size()>0) {
+            System.out.println("NC文件导入失败文件数"+errorPath.size());
+            loadList(errorPath);
+        }
+    }
+
+//	@Profile("prod_task")
+//    @Scheduled(cron = "47 12 * * * *")
+	public  boolean load(String path){
+        long start = new Date().getTime();
+        boolean res=false;
+        try {
+			NetcdfFile openNC = NetcdfFile.open(path);
+			String date = path.substring(path.length()-17, path.length()-7);
+			int hour = Integer.parseInt(path.substring(path.length()-6, path.length()-3));
+
+			res = parseFile2(date,hour,openNC);
+
+            long end = new Date().getTime();
+            System.out.println(date+hour+"共耗时"+(end-start));
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+			return res;
+		}
+
+		return res;
+	}
+
+	public  boolean parseFile2(String date,int hour,NetcdfFile openNC){
+		try {
+			Variable SFTMP = openNC.findVariable("SFTMP");
+			List<Dimension> SFTMPDimensions = SFTMP.getDimensions();
+			float[][] SFTMPDimentionsData = parseFileTwo(SFTMPDimensions, SFTMP);
+
+			String tmpLat0 = SFTMPDimensions.get(0).getFullName();//获取纬度变量
+			String tmpLon1 = SFTMPDimensions.get(1).getFullName();//获取经度变量
+			Variable Lat0Variable = openNC.findVariable(tmpLat0);//纬度
+			Variable Lon1Variable = openNC.findVariable(tmpLon1);//经度
+			List<Dimension> lat0Dimensions = Lat0Variable.getDimensions();
+			List<Dimension> lon1Dimensions = Lon1Variable.getDimensions();
+			float[] lat0 = parseFileOne(lat0Dimensions, Lat0Variable);
+			float[] lon1 = parseFileOne(lon1Dimensions, Lon1Variable);
+
+
+			List<Put> puts = new ArrayList<>();
+
+
+			StringBuilder lonstr = new StringBuilder();
+			for(int i =0;i<lon1.length;i++){
+				lonstr.append(",");
+				lonstr.append(lon1[i]);
+			}
+			lonstr.append("\n");
+
+			StringBuilder SFTMPstr = new StringBuilder();
+			SFTMPstr.append(lonstr);
+
+			for(int j=0;j<SFTMPDimentionsData.length;j++){
+				SFTMPstr.append(lat0[j]);
+				for(int k=0;k<SFTMPDimentionsData[j].length;k++){
+					SFTMPstr.append(",");
+					SFTMPstr.append(SFTMPDimentionsData[j][k]);
+				}
+				SFTMPstr.append("\n");
+			}
+
+			String rowkey  = date+hour+"_0";
+			Put put = new Put(Bytes.toBytes(rowkey));
+			put.addColumn(family, Bytes.toBytes("SFTMP"), Bytes.toBytes(SFTMPstr.toString()));
+
+			puts.add(put);
+
+			System.out.println(new Date());
+			HBaseDaoUtil.saveSomePut(puts,"weather_"+date);
+			System.out.println(new Date());
+		}catch(Exception ex){
+		System.out.println(ex);
+		return false;
+	}finally{
+		if(openNC!=null){
+			try {
+				openNC.close();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+	}
+		return true;
+	}
+
+	/**
+	 *
+	 * @Title: parseFile
+	 * @author: Mr man
+	 * @Description: 具体解析文件的方法
+	 * @param: @param date   从文件名截取的时间+0000  组成   yyyyMMddHHmmss
+	 * @param: @param hour   小时范围
+	 * @param: @param newTime  具体存储的时间
+	 * @param: @param indexEnd  动态索引尾部
+	 * @param: @param openNC   具体NC文件
+	 * @param: @return
+	 * @return: boolean
+	 * @throws
+	 */
+	public  boolean parseFile(String date,int hour,NetcdfFile openNC){
+		try{
+			Variable TMP1 = openNC.findVariable("700-500TMP");	//700-500TMP
+			Variable TMP2 = openNC.findVariable("850-500TMP");	//850-500TMP
+			Variable DEPR = openNC.findVariable("DEPR");	//DEPR
+			Variable DIV = openNC.findVariable("DIV");	//DIV
+			Variable EDA = openNC.findVariable("EDA");	//EDA
+			Variable HGT = openNC.findVariable("HGT");	//HGT
+			Variable HM = openNC.findVariable("HM");	//HM
+			Variable HMDIV = openNC.findVariable("HMDIV");	//HMDIV
+			Variable KI = openNC.findVariable("KI");	//KI
+			Variable Q = openNC.findVariable("Q");	//DEPR
+//			Variable RH = openNC.findVariable("RH");	//RH
+//			Variable TD = openNC.findVariable("TD");	//TD
+			Variable TMP = openNC.findVariable("TMP");	//TMP
+//			Variable VOR = openNC.findVariable("VOR");	//VOR
+//			Variable VV = openNC.findVariable("VV");	//VV
+//			Variable W = openNC.findVariable("W");	//W
+			List<Dimension> TMP1Dimentions = TMP1.getDimensions();
+			List<Dimension> TMP2Dimentions = TMP2.getDimensions();
+			List<Dimension> DEPRDimensions = DEPR.getDimensions();
+			List<Dimension> DIVDimensions = DIV.getDimensions();
+			List<Dimension> EDADimensions = EDA.getDimensions();
+			List<Dimension> HGTDimensions = HGT.getDimensions();
+			List<Dimension> HMDimensions = HM.getDimensions();
+			List<Dimension> HMDIVDimensions = HMDIV.getDimensions();
+			List<Dimension> KIDimensions = KI.getDimensions();
+			List<Dimension> QDimensions = Q.getDimensions();
+//			List<Dimension> RHDimensions = RH.getDimensions();
+//			List<Dimension> TDDimensions = TD.getDimensions();
+			List<Dimension> TMPDimensions = TMP.getDimensions();
+//			List<Dimension> VORDimensions = VOR.getDimensions();
+//			List<Dimension> VVDimensions = VV.getDimensions();
+//			List<Dimension> WDimensions = W.getDimensions();
+			String tmpLat = HGTDimensions.get(1).getFullName();//获取纬度变量
+			String tmpLon = HGTDimensions.get(2).getFullName();//获取经度变量
+			Variable LatVariable = openNC.findVariable(tmpLat);//纬度
+			Variable LonVariable = openNC.findVariable(tmpLon);//经度
+			List<Dimension> latDimensions = LatVariable.getDimensions();
+			List<Dimension> lonDimensions = LonVariable.getDimensions();
+			//第一组解析
+			float[][] TMP1DimentionsData = parseFileTwo(TMP1Dimentions, TMP1);
+			float[][] TMP2DimentionsData = parseFileTwo(TMP2Dimentions, TMP2);
+			float[][][] DEPRDimensionsData = parseFileThree(DEPRDimensions,DEPR);
+			float[][][] DIVDimensionsData = parseFileThree(DIVDimensions,DIV);
+			float[][][] EDADimensionsData = parseFileThree(EDADimensions,EDA);
+			float[][][] HGTDimensionsData = parseFileThree(HGTDimensions,HGT);
+			float[][][] HMDimensionsData = parseFileThree(HMDimensions,HM);
+			float[][][] HMDIVDimensionsData = parseFileThree(HMDIVDimensions,HMDIV);
+			float[][]   KIDimensionsData = parseFileTwo(KIDimensions, KI);
+			float[][][] QDimensionsData = parseFileThree(QDimensions,Q);
+//			float[][][] RHDimensionsData = parseFileThree(RHDimensions,RH);
+//			float[][][] TDDimensionsData = parseFileThree(TDDimensions,TD);
+			float[][][] TMPDimensionsData = parseFileThree(TMPDimensions,TMP);
+//			float[][][] VORDimensionsData = parseFileThree(VORDimensions,VOR);
+//			float[][][] VVDimensionsData = parseFileThree(VVDimensions,VV);
+//			float[][][] WDimensionsData = parseFileThree(WDimensions,W);
+			float[] lat = parseFileOne(latDimensions, LatVariable);
+			float[] lon = parseFileOne(lonDimensions, LonVariable);
+//			System.out.println(HGTDimensionsData.length);
+//			System.out.println(HGTDimensionsData[0].length);
+//			System.out.println(HGTDimensionsData[0][0].length);
+//			System.out.println("====================");
+			int  count = 0;
+			int x= 0 ;
+
+			List<Put> puts = new ArrayList<>();
+
+
+			StringBuilder lonstr = new StringBuilder();
+			for(int i =0;i<lon.length;i++){
+				lonstr.append(",");
+				lonstr.append(lon[i]);
+			}
+			lonstr.append("\n");
+
+			for(int i=0;i<HGTDimensionsData.length;i++){
+				StringBuilder TMP1str = new StringBuilder();
+				StringBuilder TMP2str = new StringBuilder();
+				StringBuilder DEPRstr = new StringBuilder();
+				StringBuilder DIVstr = new StringBuilder();
+				StringBuilder EDAstr = new StringBuilder();
+				StringBuilder HGTstr = new StringBuilder();
+				StringBuilder HMstr = new StringBuilder();
+				StringBuilder HMDIVstr = new StringBuilder();
+				StringBuilder KIstr = new StringBuilder();
+				StringBuilder Qstr = new StringBuilder();
+				StringBuilder TMPstr = new StringBuilder();
+
+				TMP1str.append(lonstr);
+				TMP2str.append(lonstr);
+				DEPRstr.append(lonstr);
+				DIVstr.append(lonstr);
+				EDAstr.append(lonstr);
+				HGTstr.append(lonstr);
+				HMstr.append(lonstr);
+				HMDIVstr.append(lonstr);
+				KIstr.append(lonstr);
+				Qstr.append(lonstr);
+				TMPstr.append(lonstr);
+
+				//每层每个指标矩阵
+				for(int j=0;j<HGTDimensionsData[i].length;j++){
+					TMP1str.append(lat[j]);
+					TMP2str.append(lat[j]);
+					DEPRstr.append(lat[j]);
+					DIVstr.append(lat[j]);
+					EDAstr.append(lat[j]);
+					HGTstr.append(lat[j]);
+					HMstr.append(lat[j]);
+					HMDIVstr.append(lat[j]);
+					KIstr.append(lat[j]);
+					Qstr.append(lat[j]);
+					TMPstr.append(lat[j]);
+
+					for(int k=0;k<HGTDimensionsData[i][j].length;k++){
+						TMP1str.append(",");
+						TMP2str.append(",");
+						KIstr.append(",");
+						DEPRstr.append(",");
+						DIVstr.append(",");
+						EDAstr.append(",");
+						HGTstr.append(",");
+						HMstr.append(",");
+						HMDIVstr.append(",");
+						Qstr.append(",");
+						TMPstr.append(",");
+						TMP1str.append(TMP1DimentionsData[j][k]);
+						TMP2str.append(TMP2DimentionsData[j][k]);
+						DEPRstr.append(DEPRDimensionsData[i][j][k]);
+						DIVstr.append(DIVDimensionsData[i][j][k]);
+						EDAstr.append(EDADimensionsData[i][j][k]);
+						HGTstr.append(HGTDimensionsData[i][j][k]);
+						HMstr.append(HMDimensionsData[i][j][k]);
+						HMDIVstr.append(HMDIVDimensionsData[i][j][k]);
+						KIstr.append(KIDimensionsData[j][k]);
+						Qstr.append(QDimensionsData[i][j][k]);
+						TMPstr.append(TMPDimensionsData[i][j][k]);
+					}
+
+					TMP1str.append("\n");
+					TMP2str.append("\n");
+					DEPRstr.append("\n");
+					DIVstr.append("\n");
+					EDAstr.append("\n");
+					HGTstr.append("\n");
+					HMstr.append("\n");
+					HMDIVstr.append("\n");
+					KIstr.append("\n");
+					Qstr.append("\n");
+					TMPstr.append("\n");
+				}
+
+				String rowkey  = date+hour+"_"+(i+1);
+				Put put = new Put(Bytes.toBytes(rowkey));
+				put.addColumn(family, Bytes.toBytes("TMP1"), Bytes.toBytes(TMP1str.toString()));
+				put.addColumn(family, Bytes.toBytes("TMP2"), Bytes.toBytes(TMP2str.toString()));
+				put.addColumn(family, Bytes.toBytes("DEPR"), Bytes.toBytes(DEPRstr.toString()));
+				put.addColumn(family, Bytes.toBytes("DIV"), Bytes.toBytes(DIVstr.toString()));
+				put.addColumn(family, Bytes.toBytes("EDA"), Bytes.toBytes(EDAstr.toString()));
+				put.addColumn(family, Bytes.toBytes("HGT"), Bytes.toBytes(HGTstr.toString()));
+				put.addColumn(family, Bytes.toBytes("HM"), Bytes.toBytes(HMstr.toString()));
+				put.addColumn(family, Bytes.toBytes("HMDIV"),Bytes.toBytes(HMDIVstr.toString()));
+				put.addColumn(family, Bytes.toBytes("KI"), Bytes.toBytes(KIstr.toString()));
+				put.addColumn(family, Bytes.toBytes("Q"), Bytes.toBytes(Qstr.toString()));
+				put.addColumn(family, Bytes.toBytes("TMP"), Bytes.toBytes(TMPstr.toString()));
+
+				puts.add(put);
+			}
+
+			System.out.println(new Date());
+			HBaseDaoUtil.saveSomePut(puts,"weather_"+date);
+			System.out.println(new Date());
+
+		}catch(Exception ex){
+			System.out.println(ex);
+			return false;
+		}finally{
+			if(openNC!=null){
+				try {
+					openNC.close();
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+			}
+		}
+		return true;
+	}
+
+	/*
+	 * 解析三维
+	 */
+	public static float[][][] parseFileThree(List<Dimension> dimensions,Variable n) throws Exception {
+		int[] org = new int[3];
+		int[] msg = new int[3];
+		for(int i=0;i<dimensions.size();i++) {
+			org[i] = 0;
+			msg[i] = dimensions.get(i).getLength();
+		}
+		float[][][] resultData = new float[msg[0]][msg[1]][msg[2]];
+		int length = msg[0];
+		msg[0] = 1;
+		//分层读取文件  具体分的层数  目前是取决于第一维度的大小
+		for(int i=0;i<length;i++) {
+			org[0] = i;
+			float[][][] data = (float[][][])n.read(org, msg).copyToNDJavaArray();
+			for(int m=0;m<data.length;m++){
+				for(int l=0;l<data[m].length;l++){
+					for(int p =0;p<data[m][l].length;p++) {
+						resultData[i][l][p] = data[m][l][p];
+					}
+				}
+			}
+		}
+		return resultData;
+	}
+	/*
+	 * 解析二维
+	 */
+	public static float[][] parseFileTwo(List<Dimension> dimensions,Variable n) throws Exception {
+		int[] org = new int[dimensions.size()];
+		int[] msg = new int[dimensions.size()];
+		for(int i=0;i<dimensions.size();i++) {
+			org[i] = 0;
+			msg[i] = dimensions.get(i).getLength();
+		}
+		float[][] resultData = new float[msg[0]][msg[1]];
+		int length = msg[0];
+		msg[0] = 1;
+		//分层读取文件  具体分的层数  目前是取决于第一维度的大小
+		for(int i=0;i<length;i++) {
+			org[0] = i;
+			float[][] data = (float[][])n.read(org, msg).copyToNDJavaArray();
+			for(int m=0;m<data.length;m++){
+				for(int l=0;l<data[m].length;l++){
+						resultData[i][l] = data[m][l];
+				}
+			}
+		}
+		return resultData;
+	}
+	/*
+	 * 一维数组
+	 */
+	public static float[] parseFileOne(List<Dimension> dimensions,Variable n) throws Exception {
+			float[] data = (float[])n.read().copyToNDJavaArray();
+		return data;
+	}
+}

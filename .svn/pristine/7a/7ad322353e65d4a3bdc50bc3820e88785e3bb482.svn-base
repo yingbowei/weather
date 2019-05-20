@@ -1,0 +1,28 @@
+package com.youzidata.weather.controller;
+
+import com.youzidata.weather.service.HbaseService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+
+import java.io.IOException;
+import java.util.List;
+
+@RestController
+@CrossOrigin
+public class UpdateWeatherInfoController {
+
+    @Autowired
+    HbaseService hbaseService;
+
+    @PostMapping(value="/updateTest")
+    public Object updateTest(@RequestParam(required=true)String startDate, @RequestParam(required=true)Integer hour
+            , @RequestParam(required=true)String type
+            , @RequestParam(required=true) List<String> layer
+            , @RequestParam(required=false)Double startLat
+            , @RequestParam(required=false)Double endLat
+            , @RequestParam(required=false)Double startLon
+            , @RequestParam(required=false)Double endLon) throws IOException {
+        hbaseService.updateDataToHbase(startDate,hour,type,layer,startLat,endLat,startLon,endLon);
+        return "更新成功";
+    }
+}

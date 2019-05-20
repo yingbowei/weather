@@ -1,0 +1,331 @@
+package com.youzidata.weather.task;
+
+import com.youzidata.weather.dao.HbaseDao;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.*;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.hadoop.hbase.HbaseTemplate;
+import org.springframework.stereotype.Service;
+import ucar.nc2.Dimension;
+import ucar.nc2.NetcdfFile;
+import ucar.nc2.Variable;
+
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+/**
+ * @Author: YingBoWei
+ * @Date: 2019-04-15 13:59
+ * @Description:
+ */
+@Service
+public class LoadSplitToHbaseTask {
+    @Autowired
+    private HbaseTemplate hbaseTemplate;
+
+    private static byte[] family = Bytes.toBytes("cf");//设置hbase表的列簇
+
+    public Map<String,Object> split(List<String> fileList) {
+        long startTime = System.currentTimeMillis();
+        //通过文件名来获取文件的日期
+        String date = fileList.get(0).substring(fileList.get(0).length()-15, fileList.get(0).length()-5);
+
+//        String str = fileList.get(0).substring(fileList.get(0).length()-15, fileList.get(0).length()-3);
+        //根据date，判断该表存不存在，若不存在则创建表
+        Admin admin = null;
+        Connection conn = null;
+        try {
+//            admin = DataSourceConfig.connection.getAdmin();
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            admin = conn.getAdmin();
+            if (!admin.isTableAvailable(TableName.valueOf("weather_"+date))) {
+                HTableDescriptor hbaseTable = new HTableDescriptor(TableName.valueOf("weather_"+date));
+                hbaseTable.addFamily(new HColumnDescriptor("cf"));
+
+                byte[][] splitKeys = getSplitKeys(date);
+                admin.createTable(hbaseTable,splitKeys);
+//                admin.createTable(hbaseTable);
+            }
+        } catch (IOException e) {
+            System.out.println("建表");
+            e.printStackTrace();
+        }finally{
+            try {
+                admin.close();
+                conn.close();
+            } catch (IOException e) {
+                System.out.println("admin.close();\n" +
+                        "                conn.close();");
+                e.printStackTrace();
+            }
+        }
+        System.out.println("-----"+"文件数量:"+fileList.size());
+        //开始解析nc文件并导入Hbase
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Map<String, Long> writeMap = new HashMap<>();
+        Map<String, Long> nanMap = new HashMap<>();//
+        Map<String, Long> readMap = new HashMap<>();
+        List<String> errorPath = new ArrayList<>();
+        try {
+            for(String path :fileList ) {
+                executor.execute(new Runnable() {//向线程池中添加线程
+                    @Override
+                    public void run() {
+                        try {
+                            boolean res=false;
+                            try {
+                                long startTime= System.currentTimeMillis();
+                                NetcdfFile openNC = NetcdfFile.open(path);
+                                long endTime = System.currentTimeMillis();
+                                System.out.println("-----打开文件用时:"+(endTime - startTime));
+                                String date = path.substring(path.length()-15, path.length()-5);
+//                                int hour = Integer.parseInt(path.substring(path.length()-7, path.length()-5));
+                                res = parseFile(date,openNC,nanMap,writeMap,readMap);
+                                long end = System.currentTimeMillis();
+                                System.out.println("-----解析加保存用时："+(end - endTime));
+                            } catch (IOException e) {
+                                System.out.println("parseFile()");
+                                e.printStackTrace();
+                            }
+                            if(!res) {
+                                System.out.println("-----"+path+"批量添加失败");
+                                errorPath.add(path);
+                            }
+                        } catch (Exception e) {
+                            errorPath.add(path);
+                            e.printStackTrace();
+                        }
+                    }
+                });
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        executor.shutdown();
+        while(true){
+            if(executor.isTerminated()){
+                System.out.println("-----所有的子线程都结束了！");
+                break;
+            }
+        }
+
+        if(errorPath != null && errorPath.size()>0) {
+            System.out.println("-----NC文件导入失败文件数"+errorPath.size());
+        }
+        Set<Map.Entry<String, Long>> entrySet = nanMap.entrySet();
+        long nnaTime = 0;
+        for(Map.Entry<String, Long> entry : entrySet) {
+            nnaTime += entry.getValue();
+        }
+        System.out.println("-----"+"解析共消耗:"+nnaTime);
+        long writeTime = 0;
+        Set<Map.Entry<String, Long>> entrySet2 = writeMap.entrySet();
+        for(Map.Entry<String, Long> entry : entrySet2) {
+            writeTime += entry.getValue();
+        }
+        System.out.println("-----写文件共消耗:" +writeTime);
+        long readTime = 0;
+        Set<Map.Entry<String, Long>> entrySet3 = readMap.entrySet();
+        for(Map.Entry<String, Long> entry : entrySet3) {
+            readTime += entry.getValue();
+        }
+        System.out.println("-----读文件共消耗:" +readTime);
+        Map<String, Object> resultMap = new HashMap<String, Object>();
+        resultMap.put("readTime", readTime);
+        resultMap.put("analysisTime", nnaTime);
+        resultMap.put("writeTime", writeTime);
+
+        long endTime = System.currentTimeMillis();
+        System.out.println("-----"+"程序结束:"+endTime);
+        System.out.println("-----"+"总共用时："+(endTime-startTime));
+        resultMap.put("sumTime", endTime-startTime);
+        return  resultMap;
+    }
+
+    /**
+     * 解析文件
+     * @param date
+     * @param openNC
+     * @param nanMap
+     * @param wirteMap
+     * @param readMap
+     * @return
+     */
+    public  boolean parseFile(String date,NetcdfFile openNC,Map<String, Long> nanMap,Map<String, Long> wirteMap,Map<String, Long> readMap){
+        boolean res = true;
+
+        List<Put> puts = new ArrayList<>();//一个rowkey中的，一个列，一个put对象
+        Connection conn = null;
+        try {
+            conn = ConnectionFactory.createConnection(hbaseTemplate.getConfiguration());
+            List<Variable> variables = openNC.getVariables();
+//            Map<String, Object> demensionsMap = new HashMap<>();
+            List<Dimension> dimensions = openNC.getDimensions();
+            String lon_dimension_name = null;//nc文件中的经度字段名
+            String lat_dimension_name = null;//nc文件中的纬度字段名
+            for (Dimension dimension : dimensions) {
+                if (dimension.getShortName().contains("lon")) {
+                    lon_dimension_name = dimension.getShortName();
+                }else if(dimension.getShortName().contains("lat")){
+                    lat_dimension_name = dimension.getShortName();
+                }
+            }
+
+            //根据纬度的长度和矩阵块划分标准，对经纬度矩阵进行切分
+            int split_interval = 1000;//表示每1000个单位切分一次
+            int openNC_length = openNC.findVariable(lat_dimension_name).getDimension(0).getLength();
+            int split_num = openNC_length / split_interval;//计算被切分成n块
+            Set<String> rowkey_list = new HashSet<>();//统计一共有多少rowkey
+            ExecutorService executor = Executors.newFixedThreadPool(18);
+            for(int a = 0; a < split_num; a++) {
+                for(int b = 0; b < split_num; b++) {
+                    long analysisStartTime = System.currentTimeMillis();
+                    Map<String, Object> demensionsMap = new HashMap<>();
+                    Variable latVariable = openNC.findVariable(lat_dimension_name);
+                    float[] latArray = parseFileOneSplit(latVariable, a, split_interval);
+                    demensionsMap.put(lat_dimension_name + "_title", latArray);
+
+                    Variable lonVariable = openNC.findVariable(lon_dimension_name);
+                    float[] lonArray = parseFileOneSplit(lonVariable, b, split_interval);
+                    StringBuilder stringBuilder = new StringBuilder();
+                    for (int j = 0; j < lonArray.length; j++) {
+                        stringBuilder.append(",");
+                        stringBuilder.append(lonArray[j]);
+                    }
+                    stringBuilder.append("\n");
+                    demensionsMap.put(lon_dimension_name + "_title", stringBuilder);
+
+                    int lvThreeLength = 0;
+                    Map<String,Future<List<String>>> threeMap = new HashMap<>();
+                    Map<String,Future<String>> twoMap = new HashMap<>();//存储二维的属性，用于多线程计算矩阵的参数
+
+                    ExecutorService service = Executors.newFixedThreadPool(36);
+
+                    for (Variable variable : variables) {
+                        if (variable.getDimensions().size() == 3) {//一个属性有三个维度的情况
+                        }else if(variable.getDimensions().size() == 2){//一个属性有两个维度的情况
+                            Dimension londimension = variable.getDimension(variable.getDimensions().size() - 1);
+                            String lonstr = demensionsMap.get(londimension.getShortName() + "_title").toString();
+                            Dimension latdimension = variable.getDimension(variable.getDimensions().size() - 2);
+                            float[] lat = (float[]) demensionsMap.get(latdimension.getShortName() + "_title");
+
+                            int[] org = new int[variable.getDimensions().size()];
+                            int[] msg = new int[variable.getDimensions().size()];
+                            for(int i=0;i<variable.getDimensions().size();i++) {//给每个维度设置开始位置和获取数量
+                                String name = variable.getDimensions().get(i).getFullName();
+                                //根据维度的名称，如果是纬度，需要添加开始位置和点位数量
+                                if(lat_dimension_name.equals(name)) {
+                                    org[i] = a*split_interval;
+                                    msg[i] = split_interval+1;
+                                }
+                                //根据维度的名称，如果是经度，需要添加开始位置和点位数量
+                                if(lon_dimension_name.equals(name)) {
+                                    org[i] = b*split_interval;
+                                    msg[i] = split_interval+1;
+                                }
+                            }
+                            float[][] resultData = (float[][])variable.read(org, msg).copyToNDJavaArray();
+
+                            ParseTwoThread thread = new ParseTwoThread(resultData,lonstr,lat);
+                            twoMap.put(variable.getShortName(),service.submit(thread));
+                        }
+                    }
+//                    readMap.put(a+b+hour+"read", System.currentTimeMillis() - analysisStartTime);
+//                    System.out.println("==========数据读取时间======            "+(System.currentTimeMillis() - analysisStartTime));
+//                    analysisStartTime = System.currentTimeMillis();
+
+                    service.shutdown();
+                    while(true){
+                        if(service.isTerminated()){
+                            break;
+                        }
+                    }
+                    System.out.println("==========解析时间======                "+(System.currentTimeMillis() - analysisStartTime));
+                    nanMap.put(a+b+"ana", System.currentTimeMillis() - analysisStartTime);
+
+                    //二维属性的rowkey生成规则
+                    String rowkey = date + "_" + 0 + "_" + latArray[latArray.length-1] + "_" + latArray[0] + "_" +lonArray[0] + "_" + lonArray[lonArray.length - 1];
+                    System.out.println(rowkey);
+                    rowkey_list.add(rowkey);
+                    Put put = new Put(Bytes.toBytes(rowkey));
+                    for(Map.Entry<String,Future<String>> entry : twoMap.entrySet()){
+                        put.addColumn(family, Bytes.toBytes(entry.getKey()), Bytes.toBytes(entry.getValue().get().toString()));
+                    }
+                    puts.add(put);
+
+
+                    //手动置空，释放jvm空间
+                    demensionsMap = null;
+                    latVariable = null;
+                    latArray = null;
+                    lonVariable = null;
+                    lonArray = null;
+                    stringBuilder = null;
+                    twoMap = null;
+                }
+            }
+            System.out.println("共有："+rowkey_list.size()+"个rowkey");
+            System.out.println("共有："+puts.size()+"个put");
+            //向Hbase插入数据
+            long writeStartTime = System.currentTimeMillis();//写的开始时间
+            HbaseDao.autoFlushInsert("weather_"+date,conn,puts,5);
+            long writeEndTime = System.currentTimeMillis();
+            wirteMap.put("write", writeEndTime - writeStartTime);
+        } catch (Exception ex){
+            ex.printStackTrace();
+            res = false;
+        }finally {
+            if(openNC!=null){
+                try {
+                    openNC.close();
+                } catch (IOException e) {
+                    System.out.println("openNC.close()");
+                    e.printStackTrace();
+                }
+            }
+        }
+
+
+        return res;
+    }
+
+    /**
+     * 手动划分rowkey，让其能够负载均衡，均匀分配到三个节点
+     * @param date
+     * @return
+     */
+    public static byte[][] getSplitKeys(String date) {
+        String[] keys = new String[] { date+"_0_"+"80.0_90.0", date+"_0_"+"70.0_80.0", date+"_0_"+"60.0_70.0", date+"_0_"+"50.0_60.0", date+"_0_"+"40.0_50.0",
+                date+"_0_"+"30.0_40.0",date+"_0_"+"20.0_30.0",date+"_0_"+"10.0_20.0",date+"_0_"+"0.0_90.0",date+"_0_"+"-10.0_0.0",
+                date+"_0_"+"-20.0_-10.0",date+"_0_"+"-30.0_-20.0",date+"_0_"+"-40.0_-30.0",date+"_0_"+"-50.0_-40.0",date+"_0_"+"-60.0_-50.0",
+                date+"_0_"+"-70.0_-60.0",date+"_0_"+"-80.0_-70.0",date+"_0_"+"-90.0_-80.0"};
+        byte[][] splitKeys = new byte[keys.length][];
+        TreeSet<byte[]> rows = new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR);//升序排序
+        for (int i = 0; i < keys.length; i++) {
+            rows.add(Bytes.toBytes(keys[i]));
+        }
+        Iterator<byte[]> rowKeyIter = rows.iterator();
+        int i=0;
+        while (rowKeyIter.hasNext()) {
+            byte[] tempRow = rowKeyIter.next();
+            rowKeyIter.remove();
+            splitKeys[i] = tempRow;
+            i++;
+        }
+        return splitKeys;
+    }
+
+    /*
+     * 一维数组
+     */
+    public static float[] parseFileOneSplit(Variable n,int startIndex, int split_interval) throws Exception {
+        float[] data = (float[])n.read(new int[]{startIndex * split_interval},new int[]{split_interval + 1}).copyToNDJavaArray();
+        return data;
+    }
+}
